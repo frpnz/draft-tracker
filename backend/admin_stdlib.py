@@ -84,15 +84,234 @@ def repair_broken_audit_log_fk(conn: sqlite3.Connection) -> None:
 
 
 
+def repair_broken_event_fk_refs(conn: sqlite3.Connection) -> None:
+    """Repair legacy DBs where some tables have foreign keys referencing a renamed/missing event table
+    (e.g. event_old, event__old_*, event__bak_*). This can surface later as:
+      OperationalError: no such table: main.event__old_123
+
+    We keep this repair conservative:
+      - Only touches known tables that reference event_id
+      - Rebuilds the table using the current schema.sql definition, preserving ids
+      - Does NOT rename the `event` table (so we don't rewrite other FK metadata)
+    """
+    bad_refs = set()
+    # Candidates that commonly reference event(id)
+    candidates = ["event_player", "match", "multiplayer_result", "audit_log"]
+    for t in candidates:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (t,)
+        ).fetchone()
+        if not exists:
+            continue
+        fks = conn.execute(f"PRAGMA foreign_key_list({t})").fetchall()
+        for fk in fks:
+            ref = fk["table"]
+            if not ref:
+                continue
+            # We only care about broken references that should be 'event'
+            if ref != "event":
+                ref_exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (ref,)
+                ).fetchone()
+                if (not ref_exists) or ref.startswith("event__") or ref == "event_old":
+                    bad_refs.add(t)
+
+    if not bad_refs:
+        return
+
+    def extract_create_sql(table: str) -> str:
+        # Grab the CREATE TABLE statement for `table` from schema.sql
+        # (schema.sql uses IF NOT EXISTS; we'll adapt it to a temp name)
+        m = re.search(rf"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+{re.escape(table)}\b.*?;", SCHEMA_SQL, flags=re.I|re.S)
+        if not m:
+            raise ValueError(f"Could not find CREATE TABLE statement for {table} in schema.sql")
+        return m.group(0)
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for table in sorted(bad_refs):
+            create_sql = extract_create_sql(table)
+            tmp = f"{table}__new"
+            conn.execute(f'DROP TABLE IF EXISTS "{tmp}"')
+            # Replace only the first occurrence of the table name after CREATE TABLE ...
+            create_tmp_sql = re.sub(
+                rf"(CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+){re.escape(table)}\b",
+                rf"\1{tmp}",
+                create_sql,
+                count=1,
+                flags=re.I,
+            )
+            conn.executescript(create_tmp_sql)
+
+            old_cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            new_cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({tmp})").fetchall()]
+            common = [c for c in new_cols if c in old_cols]
+            if common:
+                cols_csv = ",".join(common)
+                conn.execute(
+                    f"INSERT INTO {tmp}({cols_csv}) SELECT {cols_csv} FROM {table}"
+                )
+            conn.execute(f"DROP TABLE {table}")
+            conn.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            conn.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            pass
+
 def connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.executescript(SCHEMA_SQL)
     repair_broken_audit_log_fk(conn)
+    repair_broken_event_fk_refs(conn)
     migrate_event_schema_v2(conn)
+    migrate_event_schema_v3(conn)
     migrate_multiplayer_ranks_to_places(conn)
     return conn
+
+
+def migrate_event_schema_v3(conn: sqlite3.Connection) -> None:
+    """One-time migration:
+    - Adds event.status (draft/active/completed/archived)
+    - NOTE: we intentionally avoid rebuilding/renaming the `event` table.
+      Rebuilding via `ALTER TABLE ... RENAME TO event__old_*` can leave behind
+      temp tables and (worse) dangling references in older DBs. For this app we
+      prefer forward-only, additive migrations (ADD COLUMN) and backend-level
+      validation.
+    """
+    try:
+        done = conn.execute(
+            "SELECT 1 FROM audit_log WHERE kind='migration_event_schema_v3' LIMIT 1"
+        ).fetchone()
+        if done:
+            return
+
+        def col_exists(table: str, col: str) -> bool:
+            rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            return any(r["name"] == col for r in rows)
+
+        ev_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='event' LIMIT 1"
+        ).fetchone()
+        if not ev_exists:
+            return
+
+        if not col_exists('event', 'status'):
+            conn.execute("ALTER TABLE event ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'")
+
+        # No rebuild: we rely on backend validation for allowed statuses.
+
+        # Best-effort backfill for existing events: if they already have matches, mark as active.
+        conn.execute(
+            """
+            UPDATE event
+            SET status = CASE
+              WHEN status IS NULL OR status='' THEN
+                CASE
+                  WHEN EXISTS(SELECT 1 FROM match WHERE match.event_id = event.id) THEN 'active'
+                  ELSE 'draft'
+                END
+              ELSE status
+            END
+            """
+        )
+
+        conn.execute(
+            "INSERT INTO audit_log(event_id, created_at, kind, payload_json) VALUES(NULL, ?, 'migration_event_schema_v3', ?)",
+            (iso_utc_now(), json.dumps({"ok": True}))
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
+def rebuild_event_table_without_mode_check(conn: sqlite3.Connection) -> None:
+    """Rebuild ONLY the `event` table to remove legacy CHECK constraints on mode/status.
+
+    IMPORTANT SQLite nuance:
+    Renaming the referenced table (`event`) can cause SQLite to rewrite foreign key
+    metadata in *referencing* tables to point at the renamed table name. If we then
+    drop that renamed table, those foreign keys become dangling (e.g. referencing
+    `event__old_123`), leading to errors like: no such table: main.event__old_123.
+
+    Therefore this rebuild NEVER renames `event`. Instead we:
+      1) CREATE a new table (event__new)
+      2) COPY data from event
+      3) DROP the old event table
+      4) RENAME event__new -> event
+
+    With foreign_keys temporarily disabled, this avoids rewriting FK metadata in
+    other tables and prevents future `event__old_*` issues.
+    """
+    # Ensure required columns exist before copying.
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(event)").fetchall()]
+    if "playoff_best_of" not in cols:
+        conn.execute("ALTER TABLE event ADD COLUMN playoff_best_of INTEGER DEFAULT 1")
+    if "status" not in cols:
+        conn.execute("ALTER TABLE event ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'")
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        # Use stable temp name; drop if a previous crashed migration left it around.
+        conn.execute("DROP TABLE IF EXISTS event__new")
+        conn.execute(
+            """
+            CREATE TABLE event__new (
+              id INTEGER PRIMARY KEY,
+              name TEXT NOT NULL,
+              mode TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              notes TEXT DEFAULT '',
+              playoff_best_of INTEGER DEFAULT 1,
+              status TEXT NOT NULL DEFAULT 'draft'
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO event__new(id, name, mode, created_at, notes, playoff_best_of, status)
+            SELECT id,
+                   name,
+                   mode,
+                   created_at,
+                   COALESCE(notes,''),
+                   COALESCE(playoff_best_of,1),
+                   COALESCE(status,'draft')
+            FROM event;
+            """
+        )
+        # Drop old and swap in the new one (no rename of the referenced table).
+        conn.execute("DROP TABLE event")
+        conn.execute("ALTER TABLE event__new RENAME TO event")
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            conn.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            pass
+
 
 
 def migrate_event_schema_v2(conn: sqlite3.Connection) -> None:
@@ -100,7 +319,19 @@ def migrate_event_schema_v2(conn: sqlite3.Connection) -> None:
     - Adds event.playoff_best_of (for group tournaments)
     - Extends allowed event.mode values (adds group_playoff)
 
-    SQLite CHECK constraints are baked into the table definition, so we rebuild `event` if needed.
+    NOTE: This release is the "stable schema" baseline and avoids the old
+    pattern of renaming `event` to `event__old_<ts>`.
+
+    However, some legacy DBs shipped with a strict CHECK constraint on
+    `event.mode` (e.g. only allowing ('duel_single','duel_bo3','multiplayer')).
+    That constraint blocks creating newer tournament modes (e.g. group_playoff).
+    
+    To prevent future upgrade pain, we perform a *targeted, one-time* rebuild
+    of ONLY the `event` table when we detect such a constraint. The rebuild:
+      - does NOT leave behind any `event__old_*` tables
+      - copies all existing rows
+      - keeps the same primary keys
+      - is executed with foreign_keys temporarily disabled
     """
     try:
         done = conn.execute(
@@ -124,38 +355,22 @@ def migrate_event_schema_v2(conn: sqlite3.Connection) -> None:
         if not col_exists("event", "playoff_best_of"):
             conn.execute("ALTER TABLE event ADD COLUMN playoff_best_of INTEGER DEFAULT 1")
 
-        create_row = conn.execute(
+        # Add missing lifecycle column (cheap, safe)
+        if not col_exists("event", "status"):
+            conn.execute("ALTER TABLE event ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'")
+
+        # If legacy DB has a strict CHECK constraint on event.mode, rebuild ONLY
+        # the event table to remove the constraint.
+        ev_sql_row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='event'"
         ).fetchone()
-        create_sql = (create_row["sql"] if create_row else "") or ""
-
-        # If the CHECK constraint doesn't mention group_playoff, rebuild the table with a unique temp name.
-        if "group_playoff" not in create_sql:
-            tmp = f"event__old_{int(time.time())}"
-            try:
-                conn.execute("PRAGMA foreign_keys=OFF")
-                conn.execute(f"ALTER TABLE event RENAME TO {tmp}")
-                conn.execute(
-                    """
-                    CREATE TABLE event (
-                      id INTEGER PRIMARY KEY,
-                      name TEXT NOT NULL,
-                      mode TEXT NOT NULL CHECK (mode IN ('duel_single','duel_bo3','multiplayer','group_playoff')),
-                      created_at TEXT NOT NULL,
-                      notes TEXT DEFAULT '',
-                      playoff_best_of INTEGER DEFAULT 1
-                    );
-                    """
-                )
-                conn.execute(
-                    f"""
-                    INSERT INTO event(id,name,mode,created_at,notes,playoff_best_of)
-                      SELECT id,name,mode,created_at,notes,COALESCE(playoff_best_of,1) FROM {tmp};
-                    """
-                )
-                conn.execute(f"DROP TABLE {tmp}")
-            finally:
-                conn.execute("PRAGMA foreign_keys=ON")
+        ev_sql = (ev_sql_row["sql"] if ev_sql_row else "") or ""
+        # Trigger the rebuild only for the legacy constraint that blocks newer modes.
+        # We look for the original allowed set without group_playoff.
+        upper = ev_sql.upper()
+        has_legacy_mode_check = ("CHECK" in upper and "MODE" in upper and "DUEL_SINGLE" in upper and "MULTIPLAYER" in upper and "GROUP_PLAYOFF" not in upper)
+        if has_legacy_mode_check:
+            rebuild_event_table_without_mode_check(conn)
 
         conn.execute(
             "INSERT INTO audit_log(event_id, created_at, kind, payload_json) VALUES(NULL, ?, 'migration_event_schema_v2', ?)",
@@ -206,6 +421,73 @@ def migrate_multiplayer_ranks_to_places(conn: sqlite3.Connection) -> None:
 
 def h(s: str) -> str:
     return html.escape(s or "", quote=True)
+
+
+def duel_match_is_decided(conn: sqlite3.Connection, match_id: int) -> bool:
+    """Returns True if a duel match has a decided winner given its best_of and recorded games."""
+    mr = conn.execute("SELECT best_of, player_a, player_b FROM match WHERE id=?", (match_id,)).fetchone()
+    if not mr:
+        return False
+    bo = int(mr["best_of"] or 1)
+    a = int(mr["player_a"])
+    b = int(mr["player_b"])
+    games = conn.execute(
+        "SELECT winner_player_id FROM game WHERE match_id=? ORDER BY game_no",
+        (match_id,),
+    ).fetchall()
+    if not games:
+        return False
+    if bo == 1:
+        return True
+    # Support any odd best-of value (Bo3, Bo5, ...)
+    needed = bo // 2 + 1
+    wa = sum(1 for g in games if int(g["winner_player_id"]) == a)
+    wb = sum(1 for g in games if int(g["winner_player_id"]) == b)
+    return (wa >= needed and wa > wb) or (wb >= needed and wb > wa)
+
+
+def multiplayer_match_has_full_ranking(conn: sqlite3.Connection, match_id: int) -> bool:
+    assigned = get_assigned_players(conn, match_id)
+    if not assigned:
+        return False
+    cnt = conn.execute("SELECT COUNT(*) AS c FROM multiplayer_rank WHERE match_id=?", (match_id,)).fetchone()["c"]
+    return int(cnt) == len(assigned)
+
+
+def event_setup_locked(conn: sqlite3.Connection, event_id: int) -> bool:
+    """Setup is considered locked once any match has been generated for the event."""
+    c = conn.execute("SELECT COUNT(*) AS c FROM match WHERE event_id=?", (event_id,)).fetchone()["c"]
+    return int(c) > 0
+
+
+def event_is_completed(conn: sqlite3.Connection, event_id: int, mode: str) -> bool:
+    """Best-effort completion detection used for UI messaging.
+
+    Completion never blocks editing; it only affects what the admin shows as "inputs finished".
+    """
+    if mode in ("duel_single", "duel_bo3"):
+        mids = [int(r["id"]) for r in conn.execute(
+            "SELECT id FROM match WHERE event_id=? AND kind='duel'",
+            (event_id,),
+        ).fetchall()]
+        return bool(mids) and all(duel_match_is_decided(conn, mid) for mid in mids)
+
+    if mode == "multiplayer":
+        mids = conn.execute(
+            "SELECT id FROM match WHERE event_id=? AND kind='multiplayer'",
+            (event_id,),
+        ).fetchall()
+        mids = [int(r["id"]) for r in mids]
+        return bool(mids) and all(multiplayer_match_has_full_ranking(conn, mid) for mid in mids)
+
+    # group_playoff
+    final = conn.execute(
+        "SELECT id FROM match WHERE event_id=? AND kind='duel' AND stage='final' LIMIT 1",
+        (event_id,),
+    ).fetchone()
+    if not final:
+        return False
+    return duel_match_is_decided(conn, int(final["id"]))
 
 def read_form(handler: BaseHTTPRequestHandler) -> dict:
     length = int(handler.headers.get("Content-Length","0") or "0")
@@ -287,6 +569,10 @@ def page(title: str, body: str) -> bytes:
     .flash.error{border-color:#b00020;background:#ffe9ee}
     .flash.success{border-color:#0f5132;background:#e8fff3}
     .flash.info{border-color:#0b57d0;background:#e8f0ff}
+    .badge{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid #ddd;font-size:12px;margin-left:8px;background:#fafafa;color:#333;vertical-align:middle}
+    .badge.info{border-color:#0b57d0;background:#e8f0ff;color:#0b57d0}
+    .badge.ok{border-color:#0f5132;background:#e8fff3;color:#0f5132}
+    .badge.muted{border-color:#999;background:#f4f4f4;color:#666}
     """
     html_doc = f"""<!doctype html><html><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -317,7 +603,8 @@ def page(title: str, body: str) -> bytes:
     // Preserve scroll position across POST/redirect/GET.
     (function(){{
       try{{
-        const key = 'scroll:' + location.pathname + location.search;
+        // Use pathname only, so redirects that add ?msg=... keep the same key.
+        const key = 'scroll:' + location.pathname;
         const y = sessionStorage.getItem(key);
         if(y !== null){{
           requestAnimationFrame(() => window.scrollTo(0, parseInt(y, 10) || 0));
@@ -590,15 +877,43 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, page("Players", body))
 
             if path == "/events":
-                events = conn.execute("SELECT id, name, mode, created_at FROM event ORDER BY created_at DESC, id DESC").fetchall()
-                rows = "".join(
-                    f"<tr><td><a href='/events/{int(e['id'])}'>{h(e['name'])}</a></td><td>{h(e['mode'])}</td><td>{h(e['created_at'])}</td></tr>"
-                    for e in events
-                )
+                show_archived = (q.get('show_archived', ['0'])[0] == '1')
+                events = conn.execute("SELECT id, name, mode, created_at, status FROM event ORDER BY created_at DESC, id DESC").fetchall()
+
+                def badge(st: str) -> str:
+                    st = st or 'draft'
+                    cls = {'draft':'badge','active':'badge info','completed':'badge ok','archived':'badge muted'}.get(st,'badge')
+                    return f"<span class='{cls}'>{h(st.upper())}</span>"
+
+                def table_rows(rows):
+                    return "".join(
+                        f"<tr><td><a href='/events/{int(e['id'])}'>{h(e['name'])}</a> {badge(str(e['status'] or 'draft'))}</td><td>{h(e['mode'])}</td><td>{h(e['created_at'])}</td></tr>"
+                        for e in rows
+                    )
+
+                drafts = [e for e in events if (e['status'] or 'draft') == 'draft']
+                actives = [e for e in events if (e['status'] or 'draft') == 'active']
+                completed = [e for e in events if (e['status'] or 'draft') == 'completed']
+                archived = [e for e in events if (e['status'] or 'draft') == 'archived']
+
+                toggle = ("<a class='btn secondary' href='/events?show_archived=0'>Hide archived</a>" if show_archived
+                          else "<a class='btn secondary' href='/events?show_archived=1'>Show archived</a>")
+
+                def section(title, rows):
+                    if not rows:
+                        return f"<h3 style='margin-top:18px'>{h(title)}</h3><p class='muted'>None.</p>"
+                    return f"<h3 style='margin-top:18px'>{h(title)}</h3><table style='margin-top:10px'><thead><tr><th>Name</th><th>Mode</th><th>Created</th></tr></thead><tbody>{table_rows(rows)}</tbody></table>"
+
                 body = f"""<div class='card'>
                   <h2>Events</h2>
-                  <div class='row'><a class='btn' href='/events/new'>New event</a></div>
-                  <table style='margin-top:12px'><thead><tr><th>Name</th><th>Mode</th><th>Created</th></tr></thead><tbody>{rows}</tbody></table>
+                  <div class='row'>
+                    <a class='btn' href='/events/new'>New event</a>
+                    {toggle}
+                  </div>
+                  {section('Active', actives)}
+                  {section('Completed', completed)}
+                  {section('Draft (not generated yet)', drafts)}
+                  {section('Archived', archived) if show_archived else ""}
                 </div>"""
                 return self._send(200, page("Events", body))
 
@@ -836,33 +1151,223 @@ class Handler(BaseHTTPRequestHandler):
                     ORDER BY kind, stage, table_no, round_index, id
                 """, (event_id,)).fetchall()
 
+                status = str(ev["status"] if ("status" in ev.keys() and ev["status"] is not None) else "draft")
+                # "setup_locked" means the roster/pairings setup cannot be changed anymore (participants/pairings regen).
+                # IMPORTANT: for two-phase tournaments we still allow generating later phases once earlier phases are completed.
+                setup_locked = event_setup_locked(conn, event_id) or (status in ("completed", "archived"))
+                completed = event_is_completed(conn, event_id, str(ev["mode"]))
+
                 p_rows = "".join(f"<tr><td>{h(r['name'])}</td></tr>" for r in participants)
                 opts = "".join(f"<option value='{int(p['id'])}'>{h(p['name'])}</option>" for p in all_players)
 
                 mode = str(ev["mode"])
+                # Phase-aware generation controls:
+                duel_main_exists = conn.execute(
+                    "SELECT 1 FROM match WHERE event_id=? AND kind='duel' AND stage='main' LIMIT 1",
+                    (event_id,),
+                ).fetchone() is not None
+                mp_main_exists = conn.execute(
+                    "SELECT 1 FROM match WHERE event_id=? AND kind='multiplayer' AND stage='main' LIMIT 1",
+                    (event_id,),
+                ).fetchone() is not None
+                mp_final_exists = conn.execute(
+                    "SELECT 1 FROM match WHERE event_id=? AND kind='multiplayer' AND stage='final' LIMIT 1",
+                    (event_id,),
+                ).fetchone() is not None
+                gp_any_exists = conn.execute(
+                    "SELECT 1 FROM match WHERE event_id=? LIMIT 1",
+                    (event_id,),
+                ).fetchone() is not None
+                gp_semis_exist = conn.execute(
+                    "SELECT 1 FROM match WHERE event_id=? AND kind='duel' AND stage='main' AND round_index=1 LIMIT 1",
+                    (event_id,),
+                ).fetchone() is not None
+                gp_final_exists = conn.execute(
+                    "SELECT 1 FROM match WHERE event_id=? AND kind='duel' AND stage='final' LIMIT 1",
+                    (event_id,),
+                ).fetchone() is not None
+
+                # Pre-generation estimate (matches + formula) — shown before you generate the first phase.
+                n_players = len(participants)
+                def _comb2(x: int) -> int:
+                    return (x * (x - 1)) // 2
+                estimate_html = ""
+                try:
+                    if n_players >= 2:
+                        if mode in ("duel_single", "duel_bo3") and (not duel_main_exists):
+                            bo = 1 if mode == "duel_single" else 3
+                            matches_planned = _comb2(n_players)
+                            estimate_html = (
+                                "<div class='muted' style='margin-top:10px'>"
+                                f"Planned matches: <b>{matches_planned}</b> (round-robin: n·(n−1)/2 = {n_players}·({n_players}−1)/2). "
+                                f"Max games (Bo{bo}): <b>{matches_planned * bo}</b>."
+                                "</div>"
+                            )
+                        elif mode == "multiplayer" and (not mp_main_exists):
+                            n = n_players
+                            if n <= 5:
+                                nt = 1
+                            elif n <= 10:
+                                nt = 2
+                            else:
+                                nt = 3
+                            total = nt + (1 if nt >= 2 else 0)
+                            estimate_html = (
+                                "<div class='muted' style='margin-top:10px'>"
+                                f"Planned tables: <b>{nt}</b> main (rule: n≤5→1, n≤10→2, else→3). "
+                                f"Final table: <b>{'yes (+1)' if nt >= 2 else 'no'}</b>. "
+                                f"Total tables up to: <b>{total}</b>."
+                                "</div>"
+                            )
+                        elif mode == "group_playoff" and (not gp_any_exists):
+                            # Two groups with sizes as balanced as possible.
+                            a = (n_players + 1) // 2
+                            b = n_players - a
+                            group_matches = _comb2(a) + _comb2(b)
+                            bo = int(ev['playoff_best_of'] if ('playoff_best_of' in ev.keys() and ev['playoff_best_of'] is not None) else 1)
+                            total = group_matches + 2 + 1
+                            estimate_html = (
+                                "<div class='muted' style='margin-top:10px'>"
+                                f"Planned group matches: <b>{group_matches}</b> (A: C({a},2) + B: C({b},2)). "
+                                f"Then playoffs: <b>2</b> semifinals + <b>1</b> final (Bo{bo}). "
+                                f"Total matches: <b>{total}</b>."
+                                "</div>"
+                            )
+                except Exception:
+                    estimate_html = ""
+
+                gen_parts = []
+                # Always show an explicit note when setup is locked.
+                if setup_locked:
+                    gen_parts.append("<p class='muted'>Setup locked: participants/pairings cannot be regenerated for this event. You can still <b>modify results</b>. If you need different pairings, create a new event.</p>")
+
                 if mode == "duel_single":
-                    gen = f"<form method='POST' action='/events/{event_id}/generate'><input type='hidden' name='kind' value='duel'><input type='hidden' name='best_of' value='1'><button class='btn' type='submit'>Generate round-robin</button></form>"
+                    if not duel_main_exists and status not in ("completed", "archived"):
+                        gen_parts.append(
+                            f"<form method='POST' action='/events/{event_id}/generate'><input type='hidden' name='kind' value='duel'><input type='hidden' name='best_of' value='1'><button class='btn' type='submit'>Generate round-robin</button></form>"
+                        )
                 elif mode == "duel_bo3":
-                    gen = f"<form method='POST' action='/events/{event_id}/generate'><input type='hidden' name='kind' value='duel'><input type='hidden' name='best_of' value='3'><button class='btn' type='submit'>Generate round-robin (Bo3)</button></form>"
+                    if not duel_main_exists and status not in ("completed", "archived"):
+                        gen_parts.append(
+                            f"<form method='POST' action='/events/{event_id}/generate'><input type='hidden' name='kind' value='duel'><input type='hidden' name='best_of' value='3'><button class='btn' type='submit'>Generate round-robin (Bo3)</button></form>"
+                        )
                 elif mode == "multiplayer":
-                    gen = f"<form method='POST' action='/events/{event_id}/generate'><input type='hidden' name='kind' value='multiplayer'><button class='btn' type='submit'>Generate multiplayer tables (main)</button></form>"
+                    if not mp_main_exists and status not in ("completed", "archived"):
+                        gen_parts.append(
+                            f"<form method='POST' action='/events/{event_id}/generate'><input type='hidden' name='kind' value='multiplayer'><button class='btn' type='submit'>Generate multiplayer tables (main)</button></form>"
+                        )
                 else:  # group_playoff
                     bo = int(ev['playoff_best_of'] if ('playoff_best_of' in ev.keys() and ev['playoff_best_of'] is not None) else 1)
-                    gen = f"""<form method='POST' action='/events/{event_id}/generate_groups'>
-                      <button class='btn' type='submit'>Generate groups (Bo1)</button>
-                    </form>
-                    <form method='POST' action='/events/{event_id}/generate_playoffs'>
-                      <button class='btn secondary' type='submit'>Generate semifinals (Bo{bo})</button>
-                    </form>
-                    <form method='POST' action='/events/{event_id}/generate_final'>
-                      <button class='btn secondary' type='submit'>Generate final (Bo{bo})</button>
-                    </form>"""
+                    if (not gp_any_exists) and status not in ("completed", "archived"):
+                        gen_parts.append(
+                            f"<form method='POST' action='/events/{event_id}/generate_groups'><button class='btn' type='submit'>Generate groups (Bo1)</button></form>"
+                        )
+                    else:
+                        # Allow phase 2 generation even after phase 1 results are entered.
+                        if (not gp_semis_exist) and status not in ("completed", "archived"):
+                            gen_parts.append(
+                                f"<form method='POST' action='/events/{event_id}/generate_playoffs'><button class='btn secondary' type='submit'>Generate semifinals (Bo{bo})</button></form>"
+                            )
+                        if (not gp_final_exists) and status not in ("completed", "archived"):
+                            gen_parts.append(
+                                f"<form method='POST' action='/events/{event_id}/generate_final'><button class='btn secondary' type='submit'>Generate final (Bo{bo})</button></form>"
+                            )
 
-                # final button for multiplayer
-                mains_count = conn.execute("SELECT COUNT(*) AS c FROM match WHERE event_id=? AND kind='multiplayer' AND stage='main'", (event_id,)).fetchone()["c"]
+                gen = "".join(gen_parts) if gen_parts else "<p class='muted'>No generation actions available for the current state.</p>"
+
+                # final button for multiplayer (phase 2). This must remain available after phase 1 results are entered.
+                mains_count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM match WHERE event_id=? AND kind='multiplayer' AND stage='main'",
+                    (event_id,),
+                ).fetchone()["c"]
                 final_btn = ""
-                if mode == "multiplayer" and int(mains_count) >= 2:
+                if mode == "multiplayer" and int(mains_count) >= 2 and (not mp_final_exists) and status not in ("completed", "archived"):
                     final_btn = f"<form method='POST' action='/events/{event_id}/create_final'><button class='btn' type='submit'>Create final table</button></form>"
+
+                # Phase progression UI (explicit tournament flow) — useful for two-phase tournaments.
+                def _phase_chip(label: str, state: str, hint: str = "") -> str:
+                    """state: done|ready|pending|locked"""
+                    if state == "done":
+                        badge = "<span class='badge ok'>DONE</span>"
+                        icon = "✅"
+                    elif state == "ready":
+                        badge = "<span class='badge info'>READY</span>"
+                        icon = "⏳"
+                    elif state == "locked":
+                        badge = "<span class='badge muted'>LOCKED</span>"
+                        icon = "🔒"
+                    else:
+                        badge = "<span class='badge muted'>PENDING</span>"
+                        icon = "…"
+                    extra = f"<div class='muted' style='margin-top:4px'>{h(hint)}</div>" if hint else ""
+                    return f"<div style='min-width:240px'><div><b>{icon} {h(label)}</b> {badge}</div>{extra}</div>"
+
+                phase_card = ""
+                if mode == "multiplayer":
+                    main_ids = [int(r['id']) for r in conn.execute(
+                        "SELECT id FROM match WHERE event_id=? AND kind='multiplayer' AND stage='main' ORDER BY table_no, id",
+                        (event_id,),
+                    ).fetchall()]
+                    final_row = conn.execute(
+                        "SELECT id FROM match WHERE event_id=? AND kind='multiplayer' AND stage='final' LIMIT 1",
+                        (event_id,),
+                    ).fetchone()
+                    main_gen = bool(main_ids)
+                    main_done = bool(main_ids) and all(multiplayer_match_has_full_ranking(conn, mid) for mid in main_ids)
+                    final_gen = final_row is not None
+                    final_done = bool(final_row) and multiplayer_match_has_full_ranking(conn, int(final_row['id']))
+
+                    p1_state = "done" if main_done else ("ready" if main_gen else "pending")
+                    p2_state = "done" if final_done else ("ready" if (main_done and not final_gen) else ("pending" if final_gen else "locked"))
+                    hint1 = "Generate main tables, then enter full ranking for each table." if not main_done else "Main tables completed."
+                    hint2 = "Once all main tables have rankings, you can create the final table." if not main_done else ("Create final table, then enter its ranking." if not final_done else "Final completed.")
+                    phase_card = f"""
+                      <div class='card'>
+                        <h3 style='margin:0 0 8px 0'>Phase progression</h3>
+                        <div class='row'>
+                          {_phase_chip('Phase 1 — Main tables', p1_state, hint1)}
+                          {_phase_chip('Phase 2 — Final table', p2_state, hint2)}
+                        </div>
+                        <div class='muted' style='margin-top:10px'>Pairings/tables are generated only once. Results can always be edited via <b>Modify</b>.</div>
+                      </div>
+                    """
+                elif mode == "group_playoff":
+                    group_ids = [int(r['id']) for r in conn.execute(
+                        "SELECT id FROM match WHERE event_id=? AND kind='duel' AND stage='main' AND round_index=0 ORDER BY table_no, id",
+                        (event_id,),
+                    ).fetchall()]
+                    semi_ids = [int(r['id']) for r in conn.execute(
+                        "SELECT id FROM match WHERE event_id=? AND kind='duel' AND stage='main' AND round_index=1 ORDER BY table_no, id",
+                        (event_id,),
+                    ).fetchall()]
+                    final_row = conn.execute(
+                        "SELECT id FROM match WHERE event_id=? AND kind='duel' AND stage='final' LIMIT 1",
+                        (event_id,),
+                    ).fetchone()
+                    g_gen = bool(group_ids)
+                    g_done = bool(group_ids) and all(duel_match_is_decided(conn, mid) for mid in group_ids)
+                    s_gen = bool(semi_ids)
+                    s_done = bool(semi_ids) and all(duel_match_is_decided(conn, mid) for mid in semi_ids)
+                    f_gen = final_row is not None
+                    f_done = bool(final_row) and duel_match_is_decided(conn, int(final_row['id']))
+
+                    p1_state = "done" if g_done else ("ready" if g_gen else "pending")
+                    p2_state = "done" if s_done else ("ready" if (g_done and not s_gen) else ("pending" if s_gen else "locked"))
+                    p3_state = "done" if f_done else ("ready" if (s_done and not f_gen) else ("pending" if f_gen else "locked"))
+                    hint1 = "Generate groups, then play all group matches." if not g_done else "Groups completed."
+                    hint2 = "When groups are complete, generate semifinals." if not g_done else ("Play semifinals." if not s_done else "Semifinals completed.")
+                    hint3 = "When semifinals are complete, generate final." if not s_done else ("Play final." if not f_done else "Final completed.")
+                    phase_card = f"""
+                      <div class='card'>
+                        <h3 style='margin:0 0 8px 0'>Phase progression</h3>
+                        <div class='row'>
+                          {_phase_chip('Phase 1 — Groups', p1_state, hint1)}
+                          {_phase_chip('Phase 2 — Semifinals', p2_state, hint2)}
+                          {_phase_chip('Phase 3 — Final', p3_state, hint3)}
+                        </div>
+                        <div class='muted' style='margin-top:10px'>Groups/playoffs are generated only once. Results can always be edited via <b>Modify</b>.</div>
+                      </div>
+                    """
 
                 # render matches
                 cards = []
@@ -918,26 +1423,29 @@ class Handler(BaseHTTPRequestHandler):
                             controls = f"<div class='row'><a class='btn secondary' href='/events/{event_id}#match-{mid}'>Done</a>{del_form}</div>"
 
                         form = ""
+                        note = ""
                         if not decided and next_no <= bo:
-                            if not locked:
-                                allow = "1" if (edit and len(games) > 0) else "0"
-                                form = f"""<form method='POST' action='/matches/{mid}/add_game' class='row'>
+                            # Allow adding the next game even when existing results are "locked".
+                            # Locking applies to editing already-entered games (requires Modify results).
+                            allow = "1" if (edit and len(games) > 0) else "0"
+                            form = f"""<form method='POST' action='/matches/{mid}/add_game' class='row'>
                                   <input type='hidden' name='game_no' value='{next_no}'>
                                   <input type='hidden' name='allow_edit' value='{allow}'>
                                   <select name='winner_player_id' style='max-width:320px'>
                                     <option value='{int(mr["player_a"])}'>{h(a)}</option>
                                     <option value='{int(mr["player_b"])}'>{h(b)}</option>
                                   </select>
-                                  <input name='delta_life' type='number' placeholder='Δ life (winner-loser)' style='max-width:200px'>
+                                  <input name='delta_life' type='number' min='0' step='1' placeholder='Δ life (winner-loser)' style='max-width:200px'>
                                   <button class='btn' type='submit'>Add result (Game {next_no})</button>
                                 </form>"""
-                            else:
-                                form = "<p class='muted'>Results are locked. Click <b>Modify results</b> to edit.</p>"
+                            if locked and not edit:
+                                note = "<p class='muted'>Existing results are locked. Click <b>Modify results</b> to change them.</p>"
 
                         cards.append(f"""<div class='card' id='match-{mid}'>
                           <h3>DUEL · {h(mr['stage'])} · Match #{int(mr['round_index'] or 0)} — {h(a)} vs {h(b)} (Bo{bo})</h3>
                           <ul>{lines}</ul>
                           {controls}
+                          {note}
                           {form}
                         </div>""")
                     else:
@@ -997,11 +1505,44 @@ class Handler(BaseHTTPRequestHandler):
                           {form}
                         </div>""")
 
+                def _status_badge(st: str) -> str:
+                    cls = {'draft':'badge','active':'badge info','completed':'badge ok','archived':'badge muted'}.get(st,'badge')
+                    return f"<span class='{cls}'>{h(st.upper())}</span>"
+
+                status_controls = ""
+                if status in ("draft", "active") and completed:
+                    status_controls += f"""<form method='POST' action='/events/{event_id}/mark_completed'>
+                      <button class='btn' type='submit'>Mark as completed</button>
+                    </form>"""
+                if status == "completed":
+                    status_controls += f"""<form method='POST' action='/events/{event_id}/archive' onsubmit="return confirm('Archive this event? It will be hidden by default, but you can still edit results.');">
+                      <button class='btn secondary' type='submit'>Archive event</button>
+                    </form>"""
+                if status == "archived":
+                    status_controls += f"""<form method='POST' action='/events/{event_id}/unarchive'>
+                      <button class='btn secondary' type='submit'>Unarchive</button>
+                    </form>"""
+
+                participants_form = ""
+                participants_note = ""
+                if setup_locked:
+                    participants_note = "<p class='muted'>Participants are locked after generating pairings/tables.</p>"
+                else:
+                    participants_form = f"""<form method='POST' action='/events/{event_id}/add_players' class='row'>
+                      <select name='player_id' multiple size='8' style='max-width:360px'>
+                        {opts}
+                      </select>
+                      <div class='muted' style='max-width:520px'>
+                        Select one or more players (Ctrl/Cmd-click), then add.
+                        <div style='margin-top:10px'><button class='btn' type='submit'>Add selected</button></div>
+                      </div>
+                    </form>"""
+
                 body = f"""
                 <div class='card'>
                   <div class='row' style='justify-content:space-between;align-items:flex-start'>
                     <div>
-                      <h2 style='margin-bottom:6px'>{h(ev['name'])}</h2>
+                      <h2 style='margin-bottom:6px'>{h(ev['name'])} {_status_badge(status)}</h2>
                       <p><b>Mode:</b> {h(ev['mode'])} · <b>Created:</b> {h(ev['created_at'])}</p>
                       <p class='muted'>{h(ev['notes'] or '')}</p>
                     </div>
@@ -1012,23 +1553,45 @@ class Handler(BaseHTTPRequestHandler):
                 </div>
 
                 <div class='card'>
-                  <h2>Participants</h2>
-                  <form method='POST' action='/events/{event_id}/add_players' class='row'>
-                    <select name='player_id' multiple size='8' style='max-width:360px'>
-                      {opts}
-                    </select>
-                    <div class='muted' style='max-width:520px'>
-                      Select one or more players (Ctrl/Cmd-click), then add.
-                      <div style='margin-top:10px'><button class='btn' type='submit'>Add selected</button></div>
+                  <h2>Status</h2>
+                  <div class='row' style='justify-content:space-between;align-items:flex-start'>
+                    <div class='muted'>
+                      <b>Lifecycle</b>: draft → active → completed → archived. Archived events are hidden by default, but you can still edit results.
                     </div>
-                  </form>
+                    <div class='row'>{status_controls}</div>
+                  </div>
+                  <div class='row' style='align-items:flex-start'>
+                    <div style='min-width:220px'>
+                      <b>Setup</b><br>
+                      <span class='{'' if setup_locked else 'muted'}'>{'LOCKED' if setup_locked else 'OPEN'}</span>
+                      <div class='muted' style='margin-top:6px'>Pairings/tables can be generated only once.</div>
+                    </div>
+                    <div style='min-width:220px'>
+                      <b>Inputs</b><br>
+                      <span class='{'' if completed else 'muted'}'>{'COMPLETED' if completed else 'IN PROGRESS'}</span>
+                      <div class='muted' style='margin-top:6px'>When completed, no new results are expected. You can still edit.</div>
+                    </div>
+                    <div style='flex:1;min-width:260px'>
+                      <b>Editing</b><br>
+                      <div class='muted'>Use the <b>Modify</b> buttons on each match/table to edit results. Setup regeneration is disabled by design.</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class='card'>
+                  <h2>Participants</h2>
+                  {participants_form}
+                  {participants_note}
                   <table style='margin-top:12px'><thead><tr><th>Player</th></tr></thead><tbody>{p_rows}</tbody></table>
                 </div>
 
                 <div class='card'>
                   <h2>Generate / Final</h2>
                   <div class='row'>{gen}{final_btn}</div>
+                  {estimate_html}
                 </div>
+
+                {phase_card}
 
                 <div class='card'>
                   <h2>Live view</h2>
@@ -1090,6 +1653,8 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/events/(\d+)/add_players$", path)
             if m:
                 eid = int(m.group(1))
+                if event_setup_locked(conn, eid):
+                    raise ValueError("Participants are locked after generating pairings/tables. Create a new event if you need different participants.")
                 data = read_form(self)
                 pids = data.get("player_id")
                 if pids is None:
@@ -1111,15 +1676,58 @@ class Handler(BaseHTTPRequestHandler):
                 conn.commit()
                 return redirect(self, "/events")
 
+            m = re.match(r"^/events/(\d+)/mark_completed$", path)
+            if m:
+                eid = int(m.group(1))
+                ev = conn.execute("SELECT id, mode, status FROM event WHERE id=?", (eid,)).fetchone()
+                if not ev:
+                    raise ValueError("Event not found")
+                if str(ev["status"] or "draft") == "archived":
+                    raise ValueError("Archived events are already completed")
+                if not event_is_completed(conn, eid, str(ev["mode"])):
+                    raise ValueError("This event still has missing results")
+                conn.execute("UPDATE event SET status='completed' WHERE id=?", (eid,))
+                conn.commit()
+                return redirect_with_message(self, f"/events/{eid}", "Marked as completed", "success")
+
+            m = re.match(r"^/events/(\d+)/archive$", path)
+            if m:
+                eid = int(m.group(1))
+                ev = conn.execute("SELECT id, mode, status FROM event WHERE id=?", (eid,)).fetchone()
+                if not ev:
+                    raise ValueError("Event not found")
+                if str(ev["status"] or "draft") != "completed":
+                    raise ValueError("You can archive only completed events")
+                conn.execute("UPDATE event SET status='archived' WHERE id=?", (eid,))
+                conn.commit()
+                return redirect_with_message(self, "/events", "Event archived (hidden by default)", "success")
+
+            m = re.match(r"^/events/(\d+)/unarchive$", path)
+            if m:
+                eid = int(m.group(1))
+                ev = conn.execute("SELECT id, status FROM event WHERE id=?", (eid,)).fetchone()
+                if not ev:
+                    raise ValueError("Event not found")
+                if str(ev["status"] or "draft") != "archived":
+                    return redirect(self, f"/events/{eid}")
+                conn.execute("UPDATE event SET status='completed' WHERE id=?", (eid,))
+                conn.commit()
+                return redirect_with_message(self, f"/events/{eid}", "Unarchived (back to completed)", "success")
+
             m = re.match(r"^/events/(\d+)/generate$", path)
             if m:
                 eid = int(m.group(1))
                 data = read_form(self)
                 kind = data.get("kind")
-                # delete existing matches of that kind
+                # Pairings/tables must be generated only once.
+                existing = conn.execute(
+                    "SELECT 1 FROM match WHERE event_id=? AND kind=? LIMIT 1",
+                    (eid, kind),
+                ).fetchone()
+                if existing:
+                    raise ValueError("Pairings already generated for this event. Regeneration is disabled by design. Create a new event if you need new pairings.")
                 if kind == "duel":
                     best_of = int(data.get("best_of") or "1")
-                    conn.execute("DELETE FROM match WHERE event_id=? AND kind='duel'", (eid,))
                     # get participants order
                     pids = [int(r["player_id"]) for r in conn.execute(
                         "SELECT player_id FROM event_player WHERE event_id=? ORDER BY player_id",
@@ -1133,7 +1741,6 @@ class Handler(BaseHTTPRequestHandler):
                                         VALUES(?, 'duel', 'main', NULL, ?, ?, ?, ?, ?)""",
                                      (eid, best_of, a, b, idx, now))
                 elif kind == "multiplayer":
-                    conn.execute("DELETE FROM match WHERE event_id=? AND kind='multiplayer'", (eid,))
                     pids = [int(r["player_id"]) for r in conn.execute(
                         "SELECT player_id FROM event_player WHERE event_id=? ORDER BY player_id",
                         (eid,)
@@ -1156,6 +1763,8 @@ class Handler(BaseHTTPRequestHandler):
                         set_assignment(conn, eid, mid, group)
                 else:
                     raise ValueError("Unknown kind")
+                # First generation moves lifecycle to active.
+                conn.execute("UPDATE event SET status='active' WHERE id=? AND status='draft'", (eid,))
                 conn.commit()
                 return redirect(self, f"/events/{eid}")
 
@@ -1163,8 +1772,9 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/events/(\d+)/generate_groups$", path)
             if m:
                 eid = int(m.group(1))
-                # wipe any existing duel matches for this event
-                conn.execute("DELETE FROM match WHERE event_id=? AND kind='duel'", (eid,))
+                any_existing = conn.execute("SELECT 1 FROM match WHERE event_id=? LIMIT 1", (eid,)).fetchone()
+                if any_existing:
+                    raise ValueError("Setup already generated for this event. Regeneration is disabled by design. Create a new event if you need different groups.")
                 pids = [int(r["player_id"]) for r in conn.execute(
                     "SELECT player_id FROM event_player WHERE event_id=? ORDER BY player_id", (eid,)
                 ).fetchall()]
@@ -1194,6 +1804,8 @@ class Handler(BaseHTTPRequestHandler):
                     "INSERT INTO audit_log(event_id, created_at, kind, payload_json) VALUES(?,?,?,?)",
                     (eid, now, "group_assignment", json.dumps({"groups": {"A": g1, "B": g2}}, sort_keys=True)),
                 )
+                # First generation moves lifecycle to active.
+                conn.execute("UPDATE event SET status='active' WHERE id=? AND status='draft'", (eid,))
                 conn.commit()
                 return redirect_with_message(self, f"/events/{eid}", "Groups generated", "success")
 
@@ -1205,6 +1817,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not ev or str(ev["mode"]) != "group_playoff":
                     raise ValueError("This event is not a group tournament")
                 bo = int(ev["playoff_best_of"] or 1)
+                already = conn.execute(
+                    "SELECT 1 FROM match WHERE event_id=? AND kind='duel' AND stage='main' AND round_index=1 LIMIT 1",
+                    (eid,),
+                ).fetchone()
+                if already:
+                    raise ValueError("Semifinals already generated. Regeneration is disabled; use 'Modify results' on matches.")
                 # compute group standings from group matches (round_index=0, table_no=1/2)
                 def group_standings(grp: int):
                     players = [int(r["player_id"]) for r in conn.execute(
@@ -1248,8 +1866,6 @@ class Handler(BaseHTTPRequestHandler):
                 a1, a2 = g1[0], g1[1]
                 b1, b2 = g2[0], g2[1]
 
-                # clear existing semifinals
-                conn.execute("DELETE FROM match WHERE event_id=? AND kind='duel' AND stage='main' AND round_index=1", (eid,))
                 now = iso_utc_now()
                 conn.execute(
                     """INSERT INTO match(event_id, kind, stage, table_no, best_of, player_a, player_b, round_index, created_at)
@@ -1272,6 +1888,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not ev or str(ev["mode"]) != "group_playoff":
                     raise ValueError("This event is not a group tournament")
                 bo = int(ev["playoff_best_of"] or 1)
+                already = conn.execute(
+                    "SELECT 1 FROM match WHERE event_id=? AND kind='duel' AND stage='final' LIMIT 1",
+                    (eid,),
+                ).fetchone()
+                if already:
+                    raise ValueError("Final already generated. Regeneration is disabled; use 'Modify results' on the final match.")
                 semis = conn.execute(
                     "SELECT id FROM match WHERE event_id=? AND kind='duel' AND stage='main' AND round_index=1 ORDER BY id",
                     (eid,),
@@ -1300,7 +1922,6 @@ class Handler(BaseHTTPRequestHandler):
                 w2 = winner(int(semis[1]["id"]))
                 if w1 is None or w2 is None:
                     raise ValueError("Finalists not decided yet (complete semifinals first)")
-                conn.execute("DELETE FROM match WHERE event_id=? AND kind='duel' AND stage='final'", (eid,))
                 now = iso_utc_now()
                 conn.execute(
                     """INSERT INTO match(event_id, kind, stage, table_no, best_of, player_a, player_b, round_index, created_at)
@@ -1324,7 +1945,9 @@ class Handler(BaseHTTPRequestHandler):
                         delta_life = int(delta_raw)
                     except Exception:
                         raise ValueError("Delta life must be an integer")
-                    if abs(delta_life) > 999:
+                    if delta_life < 0:
+                        raise ValueError("Delta life must be ≥ 0 (winner − loser)")
+                    if delta_life > 999:
                         raise ValueError("Delta life is out of range")
                 gr = conn.execute("SELECT match_id FROM game WHERE id=?", (gid,)).fetchone()
                 if not gr:
@@ -1371,7 +1994,9 @@ class Handler(BaseHTTPRequestHandler):
                         delta_life = int(delta_raw)
                     except Exception:
                         raise ValueError("Delta life must be an integer")
-                    if abs(delta_life) > 999:
+                    if delta_life < 0:
+                        raise ValueError("Delta life must be ≥ 0 (winner − loser)")
+                    if delta_life > 999:
                         raise ValueError("Delta life is out of range")
                 mr = conn.execute("SELECT event_id, player_a, player_b FROM match WHERE id=?", (match_id,)).fetchone()
                 if not mr:
@@ -1382,11 +2007,36 @@ class Handler(BaseHTTPRequestHandler):
                 loser = b if winner == a else a
                 allow_edit = (data.get('allow_edit') == '1')
                 existing = conn.execute("SELECT 1 FROM game WHERE match_id=? AND game_no=?", (match_id, game_no)).fetchone()
-                any_existing = conn.execute("SELECT 1 FROM game WHERE match_id=? LIMIT 1", (match_id,)).fetchone()
                 if existing and not allow_edit:
                     raise ValueError("This game already has a winner. Use 'Modify results' to change it.")
-                if any_existing and game_no > 1 and not allow_edit:
-                    raise ValueError("Results are locked after the first entry. Click 'Modify results' to add more games.")
+
+                # Determine duel format (Bo1/Bo3)
+                em = conn.execute(
+                    "SELECT e.mode FROM event e JOIN match m ON m.event_id=e.id WHERE m.id=?",
+                    (match_id,),
+                ).fetchone()
+                mode = (em["mode"] if em else "duel_single") or "duel_single"
+                best_of = 3 if mode == "duel_bo3" else 1
+                if game_no < 1 or game_no > best_of:
+                    raise ValueError(f"Game number must be between 1 and {best_of}")
+
+                games = conn.execute(
+                    "SELECT game_no, winner_player_id FROM game WHERE match_id=? ORDER BY game_no",
+                    (match_id,),
+                ).fetchall()
+                max_no = int(games[-1]["game_no"]) if games else 0
+
+                # Enforce sequential entry when not editing.
+                if not allow_edit and game_no != max_no + 1:
+                    raise ValueError("Please enter games in order. Use 'Modify results' to edit previous games.")
+
+                # Prevent adding games after the match is already decided (unless editing).
+                if games and not allow_edit:
+                    wa = sum(1 for g in games if int(g["winner_player_id"]) == a)
+                    wb = sum(1 for g in games if int(g["winner_player_id"]) == b)
+                    needed = (best_of // 2) + 1
+                    if wa >= needed or wb >= needed:
+                        raise ValueError("This match is already decided. Use 'Modify results' to change results.")
                 conn.execute("""INSERT INTO game(match_id, game_no, winner_player_id, loser_player_id, delta_life)
                                 VALUES(?,?,?,?,?)
                                 ON CONFLICT(match_id, game_no) DO UPDATE SET
@@ -1424,6 +2074,12 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/events/(\d+)/create_final$", path)
             if m:
                 eid = int(m.group(1))
+                already = conn.execute(
+                    "SELECT 1 FROM match WHERE event_id=? AND kind='multiplayer' AND stage='final' LIMIT 1",
+                    (eid,),
+                ).fetchone()
+                if already:
+                    raise ValueError("Final table already created. Regeneration is disabled; use 'Modify ranking' on that table.")
                 mains = conn.execute("""SELECT id FROM match WHERE event_id=? AND kind='multiplayer' AND stage='main' ORDER BY table_no""", (eid,)).fetchall()
                 if len(mains) < 2:
                     raise ValueError("Need at least 2 main tables")
@@ -1449,8 +2105,6 @@ class Handler(BaseHTTPRequestHandler):
                 if len(mains) == 3:
                     seconds.sort(key=lambda x: (-x[0], -x[1], x[2].lower()))
                     qualifiers.append(seconds[0][3])
-                # replace final if exists
-                conn.execute("DELETE FROM match WHERE event_id=? AND kind='multiplayer' AND stage='final'", (eid,))
                 conn.execute("""INSERT INTO match(event_id, kind, stage, table_no, best_of, player_a, player_b, round_index, created_at)
                                 VALUES(?, 'multiplayer', 'final', 0, NULL, NULL, NULL, 999, ?)""",
                              (eid, iso_utc_now()))

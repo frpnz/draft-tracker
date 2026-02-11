@@ -1,8 +1,91 @@
 from __future__ import annotations
 from collections import defaultdict
+import json
 import random
 import sqlite3
 from .util import safe_max_iso
+
+
+def _chunked(seq, size: int):
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
+
+
+def _fetch_games_by_match(conn: sqlite3.Connection, match_ids: list[int]) -> dict[int, list[sqlite3.Row]]:
+    """Return {match_id: [games...]} ordered by game_no.
+
+    This avoids the N+1 query pattern when exporting event details.
+    """
+    out: dict[int, list[sqlite3.Row]] = {int(mid): [] for mid in match_ids}
+    if not match_ids:
+        return out
+    for chunk in _chunked(match_ids, 500):
+        qs = ",".join(["?"] * len(chunk))
+        rows = conn.execute(
+            f"""SELECT match_id, game_no, winner_player_id, loser_player_id, delta_life
+                 FROM game
+                 WHERE match_id IN ({qs})
+                 ORDER BY match_id, game_no""",
+            tuple(chunk),
+        ).fetchall()
+        for r in rows:
+            out[int(r["match_id"])].append(r)
+    return out
+
+
+def _fetch_multiplayer_ranks_by_match(conn: sqlite3.Connection, match_ids: list[int]) -> dict[int, list[sqlite3.Row]]:
+    out: dict[int, list[sqlite3.Row]] = {int(mid): [] for mid in match_ids}
+    if not match_ids:
+        return out
+    for chunk in _chunked(match_ids, 500):
+        qs = ",".join(["?"] * len(chunk))
+        rows = conn.execute(
+            f"""SELECT match_id, player_id, rank
+                 FROM multiplayer_rank
+                 WHERE match_id IN ({qs})
+                 ORDER BY match_id, rank ASC""",
+            tuple(chunk),
+        ).fetchall()
+        for r in rows:
+            out[int(r["match_id"])].append(r)
+    return out
+
+
+def _fetch_multiplayer_assignments(conn: sqlite3.Connection, match_ids: list[int]) -> dict[int, list[int]]:
+    """Try to load latest assignment payload per match_id from audit_log."""
+    out: dict[int, list[int]] = {int(mid): [] for mid in match_ids}
+    if not match_ids:
+        return out
+    # Audit log can be absent in older DBs.
+    try:
+        for chunk in _chunked(match_ids, 200):
+            qs = ",".join(["?"] * len(chunk))
+            rows = conn.execute(
+                f"""SELECT id, payload_json,
+                           CAST(json_extract(payload_json,'$.match_id') AS INTEGER) AS mid
+                      FROM audit_log
+                      WHERE kind='multiplayer_table_assignment'
+                        AND mid IN ({qs})
+                      ORDER BY id DESC""",
+                tuple(chunk),
+            ).fetchall()
+            seen = set()
+            for r in rows:
+                mid = r["mid"]
+                if mid is None:
+                    continue
+                mid = int(mid)
+                if mid in seen:
+                    continue  # keep latest by id desc
+                seen.add(mid)
+                try:
+                    payload = json.loads(r["payload_json"])
+                    out[mid] = [int(x) for x in payload.get("player_ids", []) if x is not None]
+                except Exception:
+                    out[mid] = []
+    except sqlite3.OperationalError:
+        return out
+    return out
 
 def _fetch_players(conn: sqlite3.Connection):
     rows = conn.execute("SELECT id, name FROM player ORDER BY name").fetchall()
@@ -37,6 +120,8 @@ def _duel_event_ranking(conn: sqlite3.Connection, event_id: int, mode: str, pid_
         (event_id,)
     ).fetchall()
 
+    games_by_match = _fetch_games_by_match(conn, [int(m["id"]) for m in matches])
+
     game_wins = defaultdict(int)
     h2h_game = defaultdict(lambda: defaultdict(int))
     match_wins = defaultdict(int)
@@ -48,11 +133,7 @@ def _duel_event_ranking(conn: sqlite3.Connection, event_id: int, mode: str, pid_
         a = int(m["player_a"]); b = int(m["player_b"])
         bo = int(m["best_of"] or 1)
 
-        games = conn.execute(
-            """SELECT game_no, winner_player_id, loser_player_id, delta_life FROM game
-               WHERE match_id=? ORDER BY game_no""",
-            (mid,)
-        ).fetchall()
+        games = games_by_match.get(mid, [])
 
         for g in games:
             w = int(g["winner_player_id"]); l = int(g["loser_player_id"])
@@ -76,10 +157,11 @@ def _duel_event_ranking(conn: sqlite3.Connection, event_id: int, mode: str, pid_
         else:
             wa = sum(1 for g in games if int(g["winner_player_id"]) == a)
             wb = sum(1 for g in games if int(g["winner_player_id"]) == b)
-            if wa >= 2 and wa > wb:
+            needed = bo // 2 + 1
+            if wa >= needed and wa > wb:
                 match_wins[a] += 1
                 h2h_match[a][b] += 1
-            elif wb >= 2 and wb > wa:
+            elif wb >= needed and wb > wa:
                 match_wins[b] += 1
                 h2h_match[b][a] += 1
 
@@ -348,9 +430,10 @@ def _match_winner_pid(conn: sqlite3.Connection, match_id: int) -> int | None:
         return int(games[0]["winner_player_id"])
     wa = sum(1 for g in games if int(g["winner_player_id"]) == a)
     wb = sum(1 for g in games if int(g["winner_player_id"]) == b)
-    if wa >= 2 and wa > wb:
+    needed = bo // 2 + 1
+    if wa >= needed and wa > wb:
         return a
-    if wb >= 2 and wb > wa:
+    if wb >= needed and wb > wa:
         return b
     return None
 
@@ -457,7 +540,11 @@ def compute_stats(conn: sqlite3.Connection) -> dict:
             if rk == match_max[mid]:  # place 1 is winner
                 games_won[pid] += 1
 
-    events = conn.execute("SELECT id, name, mode, created_at FROM event ORDER BY created_at DESC, id DESC").fetchall()
+    # status column exists in newer DBs; older ones may not, but schema.sql will create it for new installs.
+    try:
+        events = conn.execute("SELECT id, name, mode, created_at, status FROM event ORDER BY created_at DESC, id DESC").fetchall()
+    except sqlite3.OperationalError:
+        events = conn.execute("SELECT id, name, mode, created_at FROM event ORDER BY created_at DESC, id DESC").fetchall()
     events_played = defaultdict(int)
     event_wins = defaultdict(int)
     podium = defaultdict(lambda: {"first":0,"second":0,"third":0})
@@ -493,11 +580,14 @@ def compute_stats(conn: sqlite3.Connection) -> dict:
         else:
             w = _multiplayer_event_winner_details(conn, eid, pid_to_name)
 
+        st = str(e["status"] if ("status" in e.keys() and e["status"] is not None) else "draft")
+
         event_summaries.append({
             "id": eid,
             "name": str(e["name"]),
             "mode": mode,
             "created_at": str(e["created_at"]),
+            "status": st,
             "participants": [pid_to_name.get(pid, str(pid)) for pid in participants],
             "podium": [pid_to_name.get(pid, str(pid)) for pid in pod],
             "winner": (w or {}).get("name"),
@@ -511,6 +601,7 @@ def compute_stats(conn: sqlite3.Connection) -> dict:
             "name": str(e["name"]),
             "mode": mode,
             "created_at": str(e["created_at"]),
+            "status": st,
             "participants": [pid_to_name.get(pid, str(pid)) for pid in participants],
             "winner": (w or {}).get("name"),
             "victory": (w or {}).get("why"),
@@ -524,14 +615,12 @@ def compute_stats(conn: sqlite3.Connection) -> dict:
                    ORDER BY stage, COALESCE(round_index, 0), id""",
                 (eid,),
             ).fetchall()
+            m_ids = [int(mr["id"]) for mr in mrows]
+            games_by_match = _fetch_games_by_match(conn, m_ids)
             m_out = []
             for mr in mrows:
                 mid = int(mr["id"])
-                games = conn.execute(
-                    """SELECT game_no, winner_player_id, loser_player_id, delta_life
-                       FROM game WHERE match_id=? ORDER BY game_no""",
-                    (mid,),
-                ).fetchall()
+                games = games_by_match.get(mid, [])
                 m_out.append({
                     "id": mid,
                     "stage": str(mr["stage"]),
@@ -558,29 +647,14 @@ def compute_stats(conn: sqlite3.Connection) -> dict:
                    ORDER BY stage, table_no, id""",
                 (eid,),
             ).fetchall()
+            m_ids = [int(mr["id"]) for mr in mrows]
+            ranks_by_match = _fetch_multiplayer_ranks_by_match(conn, m_ids)
+            assigned_by_match = _fetch_multiplayer_assignments(conn, m_ids)
             tables = []
             for mr in mrows:
                 mid = int(mr["id"])
-                assigned = []
-                # Assignments are recorded in audit_log
-                try:
-                    row = conn.execute(
-                        """SELECT payload_json FROM audit_log
-                           WHERE kind='multiplayer_table_assignment'
-                           AND json_extract(payload_json,'$.match_id')=?
-                           ORDER BY id DESC LIMIT 1""",
-                        (mid,),
-                    ).fetchone()
-                    if row:
-                        payload = json.loads(row["payload_json"])
-                        assigned = [pid_to_name.get(int(x), str(x)) for x in payload.get("player_ids", [])]
-                except Exception:
-                    assigned = []
-                ranks = conn.execute(
-                    """SELECT player_id, rank FROM multiplayer_rank
-                       WHERE match_id=? ORDER BY rank ASC""",
-                    (mid,),
-                ).fetchall()
+                assigned = [pid_to_name.get(int(x), str(x)) for x in assigned_by_match.get(mid, [])]
+                ranks = ranks_by_match.get(mid, [])
                 placements = [
                     {"place": int(r["rank"]), "player": pid_to_name.get(int(r["player_id"]), str(r["player_id"]))}
                     for r in ranks

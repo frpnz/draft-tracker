@@ -1,7 +1,7 @@
 {
   "event_details": {
     "1": {
-      "created_at": "2026-02-11T13:05:49Z",
+      "created_at": "2026-02-10T22:07:21Z",
       "id": 1,
       "matches": [
         {
@@ -10,567 +10,496 @@
             {
               "delta_life": null,
               "game_no": 1,
-              "loser": "Giamma",
-              "winner": "Lori"
+              "loser": "Da",
+              "winner": "Fra"
             }
           ],
           "group": null,
-          "id": 9,
-          "player_a": "Lori",
-          "player_b": "Giamma",
-          "round_index": 2,
-          "stage": "final"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 12,
-              "game_no": 1,
-              "loser": "Ivan",
-              "winner": "Lori"
-            }
-          ],
-          "group": 1,
           "id": 1,
-          "player_a": "Lori",
-          "player_b": "Ivan",
-          "round_index": 0,
+          "player_a": "Fra",
+          "player_b": "Da",
+          "round_index": 1,
           "stage": "main"
         },
         {
           "best_of": 1,
           "games": [
             {
-              "delta_life": 2,
+              "delta_life": null,
               "game_no": 1,
-              "loser": "Lori",
+              "loser": "Giamma",
+              "winner": "Fra"
+            }
+          ],
+          "group": null,
+          "id": 2,
+          "player_a": "Fra",
+          "player_b": "Giamma",
+          "round_index": 2,
+          "stage": "main"
+        },
+        {
+          "best_of": 1,
+          "games": [
+            {
+              "delta_life": null,
+              "game_no": 1,
+              "loser": "Giamma",
               "winner": "Da"
             }
           ],
-          "group": 1,
-          "id": 2,
-          "player_a": "Lori",
-          "player_b": "Da",
-          "round_index": 0,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 17,
-              "game_no": 1,
-              "loser": "Da",
-              "winner": "Ivan"
-            }
-          ],
-          "group": 1,
+          "group": null,
           "id": 3,
-          "player_a": "Ivan",
-          "player_b": "Da",
-          "round_index": 0,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 7,
-              "game_no": 1,
-              "loser": "Fra",
-              "winner": "Giamma"
-            }
-          ],
-          "group": 2,
-          "id": 4,
-          "player_a": "Giamma",
-          "player_b": "Fra",
-          "round_index": 0,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 5,
-              "game_no": 1,
-              "loser": "Matti",
-              "winner": "Giamma"
-            }
-          ],
-          "group": 2,
-          "id": 5,
-          "player_a": "Giamma",
-          "player_b": "Matti",
-          "round_index": 0,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 4,
-              "game_no": 1,
-              "loser": "Matti",
-              "winner": "Fra"
-            }
-          ],
-          "group": 2,
-          "id": 6,
-          "player_a": "Fra",
-          "player_b": "Matti",
-          "round_index": 0,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 5,
-              "game_no": 1,
-              "loser": "Fra",
-              "winner": "Lori"
-            }
-          ],
-          "group": null,
-          "id": 7,
-          "player_a": "Lori",
-          "player_b": "Fra",
-          "round_index": 1,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 3,
-              "game_no": 1,
-              "loser": "Ivan",
-              "winner": "Giamma"
-            }
-          ],
-          "group": null,
-          "id": 8,
-          "player_a": "Giamma",
-          "player_b": "Ivan",
-          "round_index": 1,
-          "stage": "main"
-        }
-      ],
-      "mode": "group_playoff",
-      "name": "Cubo-Febbraio",
-      "participants": [
-        "Fra",
-        "Matti",
-        "Giamma",
-        "Lori",
-        "Ivan",
-        "Da"
-      ],
-      "victory": "won the final (Bo1)",
-      "victory_details": {
-        "final_match_id": 9,
-        "format": "Bo1"
-      },
-      "winner": "Lori"
-    },
-    "2": {
-      "created_at": "2026-02-11T13:09:26Z",
-      "id": 2,
-      "matches": [
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 12,
-              "game_no": 1,
-              "loser": "Matti",
-              "winner": "Fra"
-            }
-          ],
-          "group": null,
-          "id": 10,
-          "player_a": "Fra",
-          "player_b": "Matti",
-          "round_index": 1,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 1,
-              "game_no": 1,
-              "loser": "Teo",
-              "winner": "Fra"
-            }
-          ],
-          "group": null,
-          "id": 11,
-          "player_a": "Fra",
-          "player_b": "Teo",
-          "round_index": 2,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 2,
-              "game_no": 1,
-              "loser": "Fra",
-              "winner": "Giamma"
-            }
-          ],
-          "group": null,
-          "id": 12,
-          "player_a": "Fra",
+          "player_a": "Da",
           "player_b": "Giamma",
           "round_index": 3,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 6,
-              "game_no": 1,
-              "loser": "Stanca",
-              "winner": "Fra"
-            }
-          ],
-          "group": null,
-          "id": 13,
-          "player_a": "Fra",
-          "player_b": "Stanca",
-          "round_index": 4,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 2,
-              "game_no": 1,
-              "loser": "Fra",
-              "winner": "Da"
-            }
-          ],
-          "group": null,
-          "id": 14,
-          "player_a": "Fra",
-          "player_b": "Da",
-          "round_index": 5,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 5,
-              "game_no": 1,
-              "loser": "Teo",
-              "winner": "Matti"
-            }
-          ],
-          "group": null,
-          "id": 15,
-          "player_a": "Matti",
-          "player_b": "Teo",
-          "round_index": 6,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 5,
-              "game_no": 1,
-              "loser": "Matti",
-              "winner": "Giamma"
-            }
-          ],
-          "group": null,
-          "id": 16,
-          "player_a": "Matti",
-          "player_b": "Giamma",
-          "round_index": 7,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 3,
-              "game_no": 1,
-              "loser": "Matti",
-              "winner": "Stanca"
-            }
-          ],
-          "group": null,
-          "id": 17,
-          "player_a": "Matti",
-          "player_b": "Stanca",
-          "round_index": 8,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 15,
-              "game_no": 1,
-              "loser": "Matti",
-              "winner": "Da"
-            }
-          ],
-          "group": null,
-          "id": 18,
-          "player_a": "Matti",
-          "player_b": "Da",
-          "round_index": 9,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 5,
-              "game_no": 1,
-              "loser": "Teo",
-              "winner": "Giamma"
-            }
-          ],
-          "group": null,
-          "id": 19,
-          "player_a": "Teo",
-          "player_b": "Giamma",
-          "round_index": 10,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 5,
-              "game_no": 1,
-              "loser": "Teo",
-              "winner": "Stanca"
-            }
-          ],
-          "group": null,
-          "id": 20,
-          "player_a": "Teo",
-          "player_b": "Stanca",
-          "round_index": 11,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 3,
-              "game_no": 1,
-              "loser": "Teo",
-              "winner": "Da"
-            }
-          ],
-          "group": null,
-          "id": 21,
-          "player_a": "Teo",
-          "player_b": "Da",
-          "round_index": 12,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 18,
-              "game_no": 1,
-              "loser": "Stanca",
-              "winner": "Giamma"
-            }
-          ],
-          "group": null,
-          "id": 22,
-          "player_a": "Giamma",
-          "player_b": "Stanca",
-          "round_index": 13,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 2,
-              "game_no": 1,
-              "loser": "Da",
-              "winner": "Giamma"
-            }
-          ],
-          "group": null,
-          "id": 23,
-          "player_a": "Giamma",
-          "player_b": "Da",
-          "round_index": 14,
-          "stage": "main"
-        },
-        {
-          "best_of": 1,
-          "games": [
-            {
-              "delta_life": 3,
-              "game_no": 1,
-              "loser": "Da",
-              "winner": "Stanca"
-            }
-          ],
-          "group": null,
-          "id": 24,
-          "player_a": "Stanca",
-          "player_b": "Da",
-          "round_index": 15,
           "stage": "main"
         }
       ],
       "mode": "duel_single",
-      "name": "Draft Cubo 1",
+      "name": "Draft",
       "participants": [
         "Fra",
-        "Matti",
-        "Teo",
-        "Giamma",
-        "Stanca",
-        "Da"
+        "Da",
+        "Giamma"
       ],
+      "status": "draft",
       "victory": "best record",
       "victory_details": {
         "decided_by": "wins",
-        "delta_life": 32,
-        "random_draw": 0.9787586390296791,
-        "record": "5 win(s)",
-        "winner": "Giamma"
+        "delta_life": 0,
+        "random_draw": 0.07503079811186475,
+        "record": "2 win(s)",
+        "winner": "Fra"
       },
-      "winner": "Giamma"
+      "winner": "Fra"
+    },
+    "2": {
+      "created_at": "2026-02-10T22:10:27Z",
+      "id": 2,
+      "matches": [
+        {
+          "best_of": 3,
+          "games": [
+            {
+              "delta_life": null,
+              "game_no": 1,
+              "loser": "Da",
+              "winner": "Fra"
+            },
+            {
+              "delta_life": null,
+              "game_no": 2,
+              "loser": "Da",
+              "winner": "Fra"
+            }
+          ],
+          "group": null,
+          "id": 4,
+          "player_a": "Fra",
+          "player_b": "Da",
+          "round_index": 1,
+          "stage": "main"
+        },
+        {
+          "best_of": 3,
+          "games": [
+            {
+              "delta_life": null,
+              "game_no": 1,
+              "loser": "Giamma",
+              "winner": "Fra"
+            },
+            {
+              "delta_life": null,
+              "game_no": 2,
+              "loser": "Fra",
+              "winner": "Giamma"
+            },
+            {
+              "delta_life": null,
+              "game_no": 3,
+              "loser": "Giamma",
+              "winner": "Fra"
+            }
+          ],
+          "group": null,
+          "id": 5,
+          "player_a": "Fra",
+          "player_b": "Giamma",
+          "round_index": 2,
+          "stage": "main"
+        },
+        {
+          "best_of": 3,
+          "games": [
+            {
+              "delta_life": null,
+              "game_no": 1,
+              "loser": "Giamma",
+              "winner": "Da"
+            },
+            {
+              "delta_life": null,
+              "game_no": 2,
+              "loser": "Da",
+              "winner": "Giamma"
+            },
+            {
+              "delta_life": null,
+              "game_no": 3,
+              "loser": "Da",
+              "winner": "Giamma"
+            }
+          ],
+          "group": null,
+          "id": 6,
+          "player_a": "Da",
+          "player_b": "Giamma",
+          "round_index": 3,
+          "stage": "main"
+        }
+      ],
+      "mode": "duel_bo3",
+      "name": "Draft",
+      "participants": [
+        "Fra",
+        "Da",
+        "Giamma"
+      ],
+      "status": "draft",
+      "victory": "best record",
+      "victory_details": {
+        "decided_by": "wins",
+        "delta_life": 0,
+        "random_draw": 0.4500266624785896,
+        "record": "2 match win(s), 4 game win(s)",
+        "winner": "Fra"
+      },
+      "winner": "Fra"
+    },
+    "3": {
+      "created_at": "2026-02-10T22:11:10Z",
+      "id": 3,
+      "mode": "multiplayer",
+      "name": "Draft",
+      "participants": [
+        "Fra",
+        "Da",
+        "Giamma"
+      ],
+      "status": "draft",
+      "tables": [
+        {
+          "id": 7,
+          "placements": [
+            {
+              "place": 1,
+              "player": "Da"
+            },
+            {
+              "place": 2,
+              "player": "Fra"
+            },
+            {
+              "place": 3,
+              "player": "Giamma"
+            }
+          ],
+          "players": [
+            "Fra",
+            "Da",
+            "Giamma"
+          ],
+          "stage": "main",
+          "table_no": 1
+        }
+      ],
+      "victory": "won the table (place 1)",
+      "victory_details": {
+        "place": 1,
+        "stage": "main"
+      },
+      "winner": "Da"
+    },
+    "4": {
+      "created_at": "2026-02-10T22:19:05Z",
+      "id": 4,
+      "mode": "multiplayer",
+      "name": "Draft",
+      "participants": [
+        "Fra",
+        "Da",
+        "Giamma",
+        "Lori",
+        "Teo",
+        "Matti",
+        "Stanca",
+        "Ivan"
+      ],
+      "status": "draft",
+      "tables": [
+        {
+          "id": 10,
+          "placements": [
+            {
+              "place": 1,
+              "player": "Lori"
+            },
+            {
+              "place": 2,
+              "player": "Giamma"
+            },
+            {
+              "place": 3,
+              "player": "Stanca"
+            },
+            {
+              "place": 4,
+              "player": "Ivan"
+            }
+          ],
+          "players": [
+            "Lori",
+            "Giamma",
+            "Ivan",
+            "Stanca"
+          ],
+          "stage": "final",
+          "table_no": 0
+        },
+        {
+          "id": 8,
+          "placements": [
+            {
+              "place": 1,
+              "player": "Fra"
+            },
+            {
+              "place": 2,
+              "player": "Da"
+            },
+            {
+              "place": 3,
+              "player": "Giamma"
+            },
+            {
+              "place": 4,
+              "player": "Lori"
+            }
+          ],
+          "players": [
+            "Fra",
+            "Da",
+            "Giamma",
+            "Lori"
+          ],
+          "stage": "main",
+          "table_no": 1
+        },
+        {
+          "id": 9,
+          "placements": [
+            {
+              "place": 1,
+              "player": "Teo"
+            },
+            {
+              "place": 2,
+              "player": "Matti"
+            },
+            {
+              "place": 3,
+              "player": "Stanca"
+            },
+            {
+              "place": 4,
+              "player": "Ivan"
+            }
+          ],
+          "players": [
+            "Teo",
+            "Matti",
+            "Stanca",
+            "Ivan"
+          ],
+          "stage": "main",
+          "table_no": 2
+        }
+      ],
+      "victory": "won the final table (place 1)",
+      "victory_details": {
+        "place": 1,
+        "stage": "final"
+      },
+      "winner": "Lori"
     }
   },
   "events": [
     {
-      "created_at": "2026-02-11T13:09:26Z",
-      "id": 2,
-      "mode": "duel_single",
-      "name": "Draft Cubo 1",
+      "created_at": "2026-02-10T22:19:05Z",
+      "id": 4,
+      "mode": "multiplayer",
+      "name": "Draft",
       "participants": [
         "Fra",
-        "Matti",
-        "Teo",
+        "Da",
         "Giamma",
+        "Lori",
+        "Teo",
+        "Matti",
         "Stanca",
-        "Da"
+        "Ivan"
       ],
       "podium": [
+        "Lori",
         "Giamma",
+        "Stanca"
+      ],
+      "status": "draft",
+      "victory": "won the final table (place 1)",
+      "victory_details": {
+        "place": 1,
+        "stage": "final"
+      },
+      "winner": "Lori"
+    },
+    {
+      "created_at": "2026-02-10T22:11:10Z",
+      "id": 3,
+      "mode": "multiplayer",
+      "name": "Draft",
+      "participants": [
         "Fra",
+        "Da",
+        "Giamma"
+      ],
+      "podium": [
+        "Da",
+        "Fra",
+        "Giamma"
+      ],
+      "status": "draft",
+      "victory": "won the table (place 1)",
+      "victory_details": {
+        "place": 1,
+        "stage": "main"
+      },
+      "winner": "Da"
+    },
+    {
+      "created_at": "2026-02-10T22:10:27Z",
+      "id": 2,
+      "mode": "duel_bo3",
+      "name": "Draft",
+      "participants": [
+        "Fra",
+        "Da",
+        "Giamma"
+      ],
+      "podium": [
+        "Fra",
+        "Giamma",
         "Da"
       ],
+      "status": "draft",
       "victory": "best record",
       "victory_details": {
         "decided_by": "wins",
-        "delta_life": 32,
-        "random_draw": 0.9787586390296791,
-        "record": "5 win(s)",
-        "winner": "Giamma"
+        "delta_life": 0,
+        "random_draw": 0.4500266624785896,
+        "record": "2 match win(s), 4 game win(s)",
+        "winner": "Fra"
       },
-      "winner": "Giamma"
+      "winner": "Fra"
     },
     {
-      "created_at": "2026-02-11T13:05:49Z",
+      "created_at": "2026-02-10T22:07:21Z",
       "id": 1,
-      "mode": "group_playoff",
-      "name": "Cubo-Febbraio",
+      "mode": "duel_single",
+      "name": "Draft",
       "participants": [
         "Fra",
-        "Matti",
-        "Giamma",
-        "Lori",
-        "Ivan",
-        "Da"
+        "Da",
+        "Giamma"
       ],
       "podium": [
-        "Lori",
-        "Giamma",
-        "Ivan"
+        "Fra",
+        "Da",
+        "Giamma"
       ],
-      "victory": "won the final (Bo1)",
+      "status": "draft",
+      "victory": "best record",
       "victory_details": {
-        "final_match_id": 9,
-        "format": "Bo1"
+        "decided_by": "wins",
+        "delta_life": 0,
+        "random_draw": 0.07503079811186475,
+        "record": "2 win(s)",
+        "winner": "Fra"
       },
-      "winner": "Lori"
+      "winner": "Fra"
     }
   ],
-  "generated_utc": "2026-02-11T13:09:40Z",
+  "generated_utc": "2026-02-10T22:21:23Z",
   "players": [
     {
-      "event_wins": 0,
-      "events_played": 2,
-      "game_win_rate": 0.571429,
-      "games_played": 7,
-      "games_won": 4,
+      "event_wins": 1,
+      "events_played": 4,
+      "game_win_rate": 0.333333,
+      "games_played": 9,
+      "games_won": 3,
       "name": "Da",
       "podium": {
-        "first": 0,
-        "second": 0,
+        "first": 1,
+        "second": 1,
         "third": 1
       }
     },
     {
-      "event_wins": 0,
-      "events_played": 2,
-      "game_win_rate": 0.5,
-      "games_played": 8,
-      "games_won": 4,
+      "event_wins": 2,
+      "events_played": 4,
+      "game_win_rate": 0.777778,
+      "games_played": 9,
+      "games_won": 7,
       "name": "Fra",
       "podium": {
-        "first": 0,
+        "first": 2,
         "second": 1,
         "third": 0
       }
     },
     {
-      "event_wins": 1,
-      "events_played": 2,
-      "game_win_rate": 0.888889,
-      "games_played": 9,
-      "games_won": 8,
+      "event_wins": 0,
+      "events_played": 4,
+      "game_win_rate": 0.272727,
+      "games_played": 11,
+      "games_won": 3,
       "name": "Giamma",
       "podium": {
-        "first": 1,
-        "second": 1,
-        "third": 0
+        "first": 0,
+        "second": 2,
+        "third": 2
       }
     },
     {
       "event_wins": 0,
       "events_played": 1,
-      "game_win_rate": 0.333333,
-      "games_played": 3,
-      "games_won": 1,
+      "game_win_rate": 0.0,
+      "games_played": 2,
+      "games_won": 0,
       "name": "Ivan",
       "podium": {
         "first": 0,
         "second": 0,
-        "third": 1
+        "third": 0
       }
     },
     {
       "event_wins": 1,
       "events_played": 1,
-      "game_win_rate": 0.75,
-      "games_played": 4,
-      "games_won": 3,
+      "game_win_rate": 0.5,
+      "games_played": 2,
+      "games_won": 1,
       "name": "Lori",
       "podium": {
         "first": 1,
@@ -580,10 +509,10 @@
     },
     {
       "event_wins": 0,
-      "events_played": 2,
-      "game_win_rate": 0.142857,
-      "games_played": 7,
-      "games_won": 1,
+      "events_played": 1,
+      "game_win_rate": 0.0,
+      "games_played": 1,
+      "games_won": 0,
       "name": "Matti",
       "podium": {
         "first": 0,
@@ -594,22 +523,22 @@
     {
       "event_wins": 0,
       "events_played": 1,
-      "game_win_rate": 0.6,
-      "games_played": 5,
-      "games_won": 3,
+      "game_win_rate": 0.0,
+      "games_played": 2,
+      "games_won": 0,
       "name": "Stanca",
       "podium": {
         "first": 0,
         "second": 0,
-        "third": 0
+        "third": 1
       }
     },
     {
       "event_wins": 0,
       "events_played": 1,
-      "game_win_rate": 0.0,
-      "games_played": 5,
-      "games_won": 0,
+      "game_win_rate": 1.0,
+      "games_played": 1,
+      "games_won": 1,
       "name": "Teo",
       "podium": {
         "first": 0,

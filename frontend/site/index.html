@@ -9,7 +9,7 @@
 <body>
   <header class="wrap">
     <h1>Draft Tracker</h1>
-    <p class="muted">Static dashboard (beta). Data source: <code>data/stats.v1.json</code></p>
+    <p class="muted">Static dashboard (beta). Data source: <code>data/stats.v1.json</code> · <a href="dashboard.html">New dashboard</a></p>
   </header>
 
   <main class="wrap">
@@ -36,6 +36,9 @@
     <section class="card">
       <h2>Recent events</h2>
       <div class="muted">Tip: click an event row to expand results + winning explanation.</div>
+      <label class="muted" style="display:inline-flex;gap:8px;align-items:center;margin-top:10px">
+        <input type="checkbox" id="showArchivedEvents" style="width:auto"> Show archived events
+      </label>
       <div class="tablewrap">
         <table id="eventsTable">
           <thead>

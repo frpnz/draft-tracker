@@ -3,12 +3,18 @@ import argparse, json, shutil
 from pathlib import Path
 from .db import connect
 from .compute import compute_stats
+from .checks import validate_db
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Export Draft Tracker stats + static site")
     p.add_argument("--db", required=True)
     p.add_argument("--frontend", default=str(Path(__file__).resolve().parents[2] / "frontend" / "site"))
     p.add_argument("--docs", default=str(Path(__file__).resolve().parents[2] / "docs"))
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="Run logical DB consistency checks before exporting (fails with non-zero exit if issues are found).",
+    )
     args = p.parse_args(argv)
 
     db_path = Path(args.db)
@@ -29,6 +35,12 @@ def main(argv=None) -> int:
     shutil.copytree(frontend, docs, dirs_exist_ok=True)
 
     with connect(db_path) as conn:
+        if args.check:
+            issues = validate_db(conn)
+            if issues:
+                for msg in issues:
+                    print(f"[check] {msg}")
+                return 2
         stats = compute_stats(conn)
 
     stats_json = json.dumps(stats, indent=2, sort_keys=True)

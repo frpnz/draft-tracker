@@ -9,10 +9,13 @@ CREATE TABLE IF NOT EXISTS player (
 CREATE TABLE IF NOT EXISTS event (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
-  mode TEXT NOT NULL CHECK (mode IN ('duel_single','duel_bo3','multiplayer','group_playoff')),
+  -- NOTE: avoid hard CHECK constraints on mode so the schema can evolve
+  -- without table rebuilds/renames.
+  mode TEXT NOT NULL,
   created_at TEXT NOT NULL,
   notes TEXT DEFAULT '',
-  playoff_best_of INTEGER DEFAULT 1
+  playoff_best_of INTEGER DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'draft'
 );
 
 CREATE TABLE IF NOT EXISTS event_player (

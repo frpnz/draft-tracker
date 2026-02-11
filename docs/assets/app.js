@@ -31,16 +31,19 @@ function renderPlayers(stats){
   }
 }
 
-function renderEvents(stats){
+function renderEvents(stats, showArchived){
   const tbody = document.querySelector('#eventsTable tbody');
   tbody.innerHTML = '';
   const details = stats.event_details || {};
-  for(const e of stats.events.slice(0,25)){
+  const list = (stats.events || []).filter(e => showArchived || ((e.status || 'draft') !== 'archived'))
+  for(const e of list.slice(0,25)){
     const tr = document.createElement('tr');
+    tr.id = 'event-' + e.id;
     tr.style.cursor = 'pointer';
+    const name = (e.status === 'archived') ? (e.name + ' (archived)') : e.name;
     const cells = [
       e.created_at,
-      e.name,
+      name,
       e.mode,
       (e.participants||[]).join(', '),
       e.winner || '',
@@ -60,6 +63,25 @@ function renderEvents(stats){
   }
 }
 
+
+function openEventFromHash(stats){
+  const h = (location.hash || '').trim();
+  if(!h.startsWith('#event-')) return;
+  const id = h.slice('#event-'.length);
+  const ev = (stats.events || []).find(e => String(e.id) === String(id));
+  if(!ev) return;
+  const d = (stats.event_details || {})[String(ev.id)];
+  // If details area already shows this event, do nothing
+  const title = document.getElementById('eventDetailTitle');
+  if(title && title.textContent && title.textContent.includes('#'+String(ev.id))) return;
+  // Scroll row into view if present
+  const row = document.getElementById('event-'+String(ev.id));
+  if(row) row.scrollIntoView({block:'center'});
+  showEventDetail(ev, d);
+}
+window.addEventListener('hashchange', () => {
+  if(window.__DRAFT_STATS__) openEventFromHash(window.__DRAFT_STATS__);
+});
 function escapeHtml(s){
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -108,9 +130,16 @@ function showEventDetail(summary, detail){
 (async function(){
   try{
     const stats = await loadStats();
+    window.__DRAFT_STATS__ = stats;
     document.getElementById('generated').textContent = 'Generated: ' + stats.generated_utc;
     renderPlayers(stats);
-    renderEvents(stats);
+    const cb = document.getElementById('showArchivedEvents');
+    const redraw = () => {
+      renderEvents(stats, cb ? cb.checked : false);
+      openEventFromHash(stats);
+    };
+    if(cb) cb.addEventListener('change', redraw);
+    redraw();
   }catch(err){
     document.body.innerHTML = '<pre style="padding:16px">'+String(err)+'</pre>';
   }
