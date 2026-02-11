@@ -1,0 +1,72 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Draft Tracker</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="wrap">
+    <h1>Draft Tracker</h1>
+    <p class="muted">Static dashboard (beta). Data source: <code>data/stats.v1.json</code></p>
+  </header>
+
+  <main class="wrap">
+    <section class="card">
+      <h2>Players</h2>
+      <div class="muted" id="generated"></div>
+      <div class="tablewrap">
+        <table id="playersTable">
+          <thead>
+            <tr>
+              <th>Player</th>
+              <th>Games won</th>
+              <th>Games played</th>
+              <th>Win rate</th>
+              <th>Event wins</th>
+              <th>Podium (1/2/3)</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Recent events</h2>
+      <div class="muted">Tip: click an event row to expand results + winning explanation.</div>
+      <div class="tablewrap">
+        <table id="eventsTable">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Name</th>
+              <th>Mode</th>
+              <th>Participants</th>
+              <th>Winner</th>
+              <th>Victory</th>
+              <th>Podium</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" id="eventDetail" style="display:none">
+      <h2 id="eventDetailTitle">Event detail</h2>
+      <div class="muted" id="eventDetailMeta"></div>
+      <div id="eventDetailBody" style="margin-top:12px"></div>
+    </section>
+  </main>
+
+  <footer class="wrap muted">
+    Export with <code>python backend/export_stats.py --db data/draft_tracker.sqlite</code>
+  </footer>
+
+  <!-- Exporter writes data/stats.v1.js so the dashboard works even when opened via file:// -->
+  <script src="data/stats.v1.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>
