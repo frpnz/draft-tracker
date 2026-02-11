@@ -449,7 +449,7 @@ window.__DRAFT_STATS__ = {
       "victory_details": {
         "decided_by": "wins",
         "delta_life": 32,
-        "random_draw": 0.7640039383631413,
+        "random_draw": 0.9787586390296791,
         "record": "5 win(s)",
         "winner": "Giamma"
       },
@@ -479,7 +479,7 @@ window.__DRAFT_STATS__ = {
       "victory_details": {
         "decided_by": "wins",
         "delta_life": 32,
-        "random_draw": 0.7640039383631413,
+        "random_draw": 0.9787586390296791,
         "record": "5 win(s)",
         "winner": "Giamma"
       },
