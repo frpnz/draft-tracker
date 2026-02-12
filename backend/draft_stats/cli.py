@@ -52,6 +52,19 @@ def main(argv=None) -> int:
     )
     schema_src = Path(__file__).resolve().parents[1] / "stats.v1.schema.json"
     (data_dir / "stats.v1.schema.json").write_text(schema_src.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # Optional: also write the same `data/` folder next to the frontend sources.
+    # This makes it easy to open `frontend/site/*.html` directly during development
+    # without having to navigate into `docs/`.
+    try:
+        frontend_data = frontend / "data"
+        frontend_data.mkdir(parents=True, exist_ok=True)
+        (frontend_data / "stats.v1.json").write_text(stats_json, encoding="utf-8")
+        (frontend_data / "stats.v1.js").write_text("window.__DRAFT_STATS__ = " + stats_json + ";\n", encoding="utf-8")
+        (frontend_data / "stats.v1.schema.json").write_text(schema_src.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        # Don't fail the export if the frontend directory is read-only or missing.
+        pass
     return 0
 
 if __name__ == "__main__":

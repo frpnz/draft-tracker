@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS event (
   mode TEXT NOT NULL,
   created_at TEXT NOT NULL,
   notes TEXT DEFAULT '',
+  -- For group tournaments: format of the *group phase* (A/B round-robin)
+  group_best_of INTEGER DEFAULT 1,
   playoff_best_of INTEGER DEFAULT 1,
   status TEXT NOT NULL DEFAULT 'draft'
 );

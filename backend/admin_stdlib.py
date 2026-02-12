@@ -176,8 +176,56 @@ def connect(db_path: Path) -> sqlite3.Connection:
     repair_broken_event_fk_refs(conn)
     migrate_event_schema_v2(conn)
     migrate_event_schema_v3(conn)
+    migrate_event_schema_v4(conn)
     migrate_multiplayer_ranks_to_places(conn)
     return conn
+
+
+def migrate_event_schema_v4(conn: sqlite3.Connection) -> None:
+    """One-time migration:
+    - Adds event.group_best_of (Bo1/Bo3/Bo5...) used for the *group phase* of
+      `group_playoff` tournaments ("Two groups → Playoffs").
+
+    Older DBs only had `playoff_best_of` (semis+final). Without this column, the
+    group phase is implicitly Bo1.
+    """
+    try:
+        done = conn.execute(
+            "SELECT 1 FROM audit_log WHERE kind='migration_event_schema_v4' LIMIT 1"
+        ).fetchone()
+        if done:
+            return
+
+        def col_exists(table: str, col: str) -> bool:
+            rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            return any(r["name"] == col for r in rows)
+
+        ev_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='event' LIMIT 1"
+        ).fetchone()
+        if not ev_exists:
+            return
+
+        if not col_exists('event', 'group_best_of'):
+            conn.execute("ALTER TABLE event ADD COLUMN group_best_of INTEGER DEFAULT 1")
+
+        # Best-effort backfill
+        conn.execute(
+            "UPDATE event SET group_best_of = COALESCE(NULLIF(group_best_of,0), 1)"
+        )
+
+        conn.execute(
+            "INSERT INTO audit_log(event_id, created_at, kind, payload_json) VALUES(NULL, ?, 'migration_event_schema_v4', ?)",
+            (iso_utc_now(), json.dumps({"ok": True}))
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
 
 def migrate_event_schema_v3(conn: sqlite3.Connection) -> None:
@@ -939,7 +987,16 @@ class Handler(BaseHTTPRequestHandler):
                             <option value='3'>Bo3</option>
                           </select>
                         </label>
-                        <div class='muted' style='margin-top:6px'>Groups are always Bo1; this sets semifinals + final.</div>
+                        <div class='muted' style='margin-top:6px'>Sets semifinals + final for the <b>Two groups</b> mode.</div>
+                      </div>
+                      <div style='flex:1;min-width:260px'>
+                        <label>Groups format (group mode only)<br>
+                          <select name='group_best_of'>
+                            <option value='1'>Bo1</option>
+                            <option value='3'>Bo3</option>
+                          </select>
+                        </label>
+                        <div class='muted' style='margin-top:6px'>Sets the format for the <b>group phase</b> (A/B round-robin).</div>
                       </div>
                     </div>
                     <div style='margin-top:12px'><label>Notes<br><textarea name='notes'></textarea></label></div>
@@ -950,41 +1007,67 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/api/events/(\d+)/live$", path)
             if m:
                 event_id = int(m.group(1))
-                ev = conn.execute("SELECT id, name, mode, playoff_best_of FROM event WHERE id=?", (event_id,)).fetchone()
+                ev = conn.execute("SELECT id, name, mode, playoff_best_of, group_best_of FROM event WHERE id=?", (event_id,)).fetchone()
                 if not ev:
                     return self._send_json(404, {"error": "not_found"})
                 mode = str(ev["mode"])
-                payload = {"id": event_id, "name": str(ev["name"]), "mode": mode, "now": iso_utc_now()}
-
+                payload = {
+                    "id": event_id,
+                    "name": str(ev["name"]),
+                    "mode": mode,
+                    "now": iso_utc_now(),
+                    "group_best_of": int(ev["group_best_of"] or 1) if ("group_best_of" in ev.keys()) else 1,
+                    "playoff_best_of": int(ev["playoff_best_of"] or 1) if ("playoff_best_of" in ev.keys()) else 1,
+                }
                 if mode == "group_playoff":
                     # Group standings
                     def standings(grp: int):
                         wins = {}
+                        game_wins = {}
                         delta = {}
                         matches = conn.execute(
-                            "SELECT id, player_a, player_b FROM match WHERE event_id=? AND kind='duel' AND stage='main' AND round_index=0 AND table_no=?",
+                            "SELECT id, player_a, player_b, best_of FROM match WHERE event_id=? AND kind='duel' AND stage='main' AND round_index=0 AND table_no=?",
                             (event_id, grp),
                         ).fetchall()
                         for mr in matches:
                             a = int(mr["player_a"]); b = int(mr["player_b"])
                             wins.setdefault(a, 0); wins.setdefault(b, 0)
+                            game_wins.setdefault(a, 0); game_wins.setdefault(b, 0)
                             delta.setdefault(a, 0); delta.setdefault(b, 0)
                             games = conn.execute(
                                 "SELECT winner_player_id, loser_player_id, delta_life FROM game WHERE match_id=? ORDER BY game_no",
                                 (int(mr["id"]),),
                             ).fetchall()
+                            # Count match wins only when the match has a decided winner.
+                            # (Groups are Bo1 by default, but this keeps the logic correct if you ever switch to Bo3/Bo5.)
                             if games:
-                                w = int(games[0]["winner_player_id"])
-                                wins[w] = wins.get(w, 0) + 1
+                                bo = int(mr["best_of"] or 1)
+                                wa = sum(1 for g in games if int(g["winner_player_id"]) == a)
+                                wb = sum(1 for g in games if int(g["winner_player_id"]) == b)
+                                w = None
+                                if bo == 1 and len(games) >= 1:
+                                    w = int(games[0]["winner_player_id"])
+                                else:
+                                    needed = bo // 2 + 1
+                                    if wa >= needed and wa > wb:
+                                        w = a
+                                    elif wb >= needed and wb > wa:
+                                        w = b
+                                if w is not None:
+                                    wins[w] = wins.get(w, 0) + 1
                             for g in games:
                                 if g["delta_life"] is None:
                                     continue
+                                # Always count per-game wins (useful as a Bo3 tie-breaker)
+                                wpid = int(g["winner_player_id"])
+                                game_wins[wpid] = game_wins.get(wpid, 0) + 1
                                 d = int(g["delta_life"])
-                                wpid = int(g["winner_player_id"]); lpid = int(g["loser_player_id"])
+                                lpid = int(g["loser_player_id"])
                                 delta[wpid] = delta.get(wpid, 0) + d
                                 delta[lpid] = delta.get(lpid, 0) - d
                         pids = sorted(set(list(wins.keys())))
-                        pids.sort(key=lambda pid: (-wins.get(pid, 0), -delta.get(pid, 0), pid))
+                        # Tie-break (especially relevant for Bo3): wins → game wins → Δ life → id
+                        pids.sort(key=lambda pid: (-wins.get(pid, 0), -game_wins.get(pid, 0), -delta.get(pid, 0), pid))
                         rows = []
                         for pid in pids:
                             nm = conn.execute("SELECT name FROM player WHERE id=?", (pid,)).fetchone()
@@ -1070,9 +1153,12 @@ class Handler(BaseHTTPRequestHandler):
                         mw = None
                         if bo == 1 and len(games) >= 1:
                             mw = int(games[0]["winner_player_id"])
-                        elif bo == 3:
-                            if wa >= 2: mw = a
-                            elif wb >= 2: mw = b
+                        elif bo > 1:
+                            needed = bo // 2 + 1
+                            if wa >= needed and wa > wb:
+                                mw = a
+                            elif wb >= needed and wb > wa:
+                                mw = b
                         if mw is not None:
                             wins[mw] = wins.get(mw, 0) + 1
 
@@ -1258,9 +1344,10 @@ class Handler(BaseHTTPRequestHandler):
                         )
                 else:  # group_playoff
                     bo = int(ev['playoff_best_of'] if ('playoff_best_of' in ev.keys() and ev['playoff_best_of'] is not None) else 1)
+                    gbo = int(ev['group_best_of'] if ('group_best_of' in ev.keys() and ev['group_best_of'] is not None) else 1)
                     if (not gp_any_exists) and status not in ("completed", "archived"):
                         gen_parts.append(
-                            f"<form method='POST' action='/events/{event_id}/generate_groups'><button class='btn' type='submit'>Generate groups (Bo1)</button></form>"
+                            f"<form method='POST' action='/events/{event_id}/generate_groups'><button class='btn' type='submit'>Generate groups (Bo{gbo})</button></form>"
                         )
                     else:
                         # Allow phase 2 generation even after phase 1 results are entered.
@@ -1639,12 +1726,17 @@ class Handler(BaseHTTPRequestHandler):
                 name = (data.get("name") or "").strip() or "Draft"
                 mode = data.get("mode") or "duel_single"
                 notes = data.get("notes") or ""
+
                 pbo = int(data.get("playoff_best_of") or "1")
+                gbo = int(data.get("group_best_of") or "1")
                 if pbo not in (1, 3):
                     pbo = 1
+                if gbo not in (1, 3):
+                    gbo = 1
+
                 conn.execute(
-                    "INSERT INTO event(name, mode, created_at, notes, playoff_best_of) VALUES(?,?,?,?,?)",
-                    (name, mode, iso_utc_now(), notes, pbo),
+                    "INSERT INTO event(name, mode, created_at, notes, playoff_best_of, group_best_of) VALUES(?,?,?,?,?,?)",
+                    (name, mode, iso_utc_now(), notes, pbo, gbo),
                 )
                 eid = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
                 conn.commit()
@@ -1768,27 +1860,38 @@ class Handler(BaseHTTPRequestHandler):
                 conn.commit()
                 return redirect(self, f"/events/{eid}")
 
-            # Group tournament: generate two groups (Bo1 round-robin)
+            # Group tournament: generate two groups (round-robin)
             m = re.match(r"^/events/(\d+)/generate_groups$", path)
             if m:
                 eid = int(m.group(1))
+                ev = conn.execute("SELECT mode, group_best_of FROM event WHERE id=?", (eid,)).fetchone()
+                if not ev or str(ev["mode"]) != "group_playoff":
+                    raise ValueError("This event is not a group tournament")
+                gbo = int(ev["group_best_of"] or 1)
+                if gbo not in (1, 3, 5):
+                    gbo = 1
+
                 any_existing = conn.execute("SELECT 1 FROM match WHERE event_id=? LIMIT 1", (eid,)).fetchone()
                 if any_existing:
                     raise ValueError("Setup already generated for this event. Regeneration is disabled by design. Create a new event if you need different groups.")
+
                 pids = [int(r["player_id"]) for r in conn.execute(
                     "SELECT player_id FROM event_player WHERE event_id=? ORDER BY player_id", (eid,)
                 ).fetchall()]
                 mcount = len(pids)
                 if mcount < 6 or mcount > 10:
                     raise ValueError("Group tournament requires 6 to 10 participants")
+
                 rng = secrets.SystemRandom()
                 rng.shuffle(pids)
-                a = (mcount + 1)//2
+                a = (mcount + 1) // 2
                 g1 = pids[:a]
                 g2 = pids[a:]
+
                 # ensure both groups at least 3
                 while len(g2) < 3:
                     g2.insert(0, g1.pop())
+
                 now = iso_utc_now()
                 ridx = 0
                 for grp, players in ((1, g1), (2, g2)):
@@ -1796,18 +1899,20 @@ class Handler(BaseHTTPRequestHandler):
                         ridx += 1
                         conn.execute(
                             """INSERT INTO match(event_id, kind, stage, table_no, best_of, player_a, player_b, round_index, created_at)
-                               VALUES(?, 'duel', 'main', ?, 1, ?, ?, 0, ?)""",
-                            (eid, grp, pa, pb, now),
+                               VALUES(?, 'duel', 'main', ?, ?, ?, ?, 0, ?)""",
+                            (eid, grp, gbo, pa, pb, now),
                         )
+
                 # record assignment
                 conn.execute(
                     "INSERT INTO audit_log(event_id, created_at, kind, payload_json) VALUES(?,?,?,?)",
                     (eid, now, "group_assignment", json.dumps({"groups": {"A": g1, "B": g2}}, sort_keys=True)),
                 )
+
                 # First generation moves lifecycle to active.
                 conn.execute("UPDATE event SET status='active' WHERE id=? AND status='draft'", (eid,))
                 conn.commit()
-                return redirect_with_message(self, f"/events/{eid}", "Groups generated", "success")
+                return redirect_with_message(self, f"/events/{eid}", f"Groups generated (Bo{gbo})", "success")
 
             # Generate semifinals (A1 vs B2, B1 vs A2)
             m = re.match(r"^/events/(\d+)/generate_playoffs$", path)
@@ -1823,12 +1928,56 @@ class Handler(BaseHTTPRequestHandler):
                 ).fetchone()
                 if already:
                     raise ValueError("Semifinals already generated. Regeneration is disabled; use 'Modify results' on matches.")
+                # Require group stage completion before generating playoffs.
+                # This avoids incorrect qualifiers when using Bo3 in groups.
+                def _match_winner_if_decided(mid: int) -> int | None:
+                    mr0 = conn.execute("SELECT best_of, player_a, player_b FROM match WHERE id=?", (mid,)).fetchone()
+                    if not mr0:
+                        return None
+                    a0 = int(mr0["player_a"]); b0 = int(mr0["player_b"])
+                    bo0 = int(mr0["best_of"] or 1)
+                    games0 = conn.execute("SELECT game_no, winner_player_id FROM game WHERE match_id=? ORDER BY game_no", (mid,)).fetchall()
+                    if not games0:
+                        return None
+                    # Safety: if Bo1 but multiple games were inserted (shouldn't happen), treat as undecided.
+                    if bo0 == 1:
+                        if len(games0) != 1:
+                            return None
+                        return int(games0[0]["winner_player_id"])
+                    wa0 = sum(1 for g in games0 if int(g["winner_player_id"]) == a0)
+                    wb0 = sum(1 for g in games0 if int(g["winner_player_id"]) == b0)
+                    needed0 = bo0 // 2 + 1
+                    if wa0 >= needed0 and wa0 > wb0:
+                        return a0
+                    if wb0 >= needed0 and wb0 > wa0:
+                        return b0
+                    return None
+
+                group_matches = conn.execute(
+                    "SELECT id FROM match WHERE event_id=? AND kind='duel' AND stage='main' AND round_index=0",
+                    (eid,),
+                ).fetchall()
+                if not group_matches:
+                    raise ValueError("Generate groups first")
+                not_done = []
+                for r0 in group_matches:
+                    mid0 = int(r0["id"])
+                    if _match_winner_if_decided(mid0) is None:
+                        not_done.append(mid0)
+                if not_done:
+                    # Keep the error short but actionable.
+                    raise ValueError(
+                        f"Group stage not complete yet: {len(not_done)} match(es) still undecided. "
+                        "Complete all group matches before generating semifinals."
+                    )
+
                 # compute group standings from group matches (round_index=0, table_no=1/2)
                 def group_standings(grp: int):
                     players = [int(r["player_id"]) for r in conn.execute(
                         "SELECT player_id FROM event_player WHERE event_id=?", (eid,)
                     ).fetchall()]
                     wins = {pid: 0 for pid in players}
+                    game_wins = {pid: 0 for pid in players}
                     delta = {pid: 0 for pid in players}
                     matches = conn.execute(
                         "SELECT id, player_a, player_b, best_of FROM match WHERE event_id=? AND kind='duel' AND stage='main' AND round_index=0 AND table_no=?",
@@ -1840,12 +1989,31 @@ class Handler(BaseHTTPRequestHandler):
                         games = conn.execute(
                             "SELECT winner_player_id, loser_player_id, delta_life FROM game WHERE match_id=?", (mid,)
                         ).fetchall()
+                        # Count match wins only when the match has a decided winner.
                         if games:
-                            w = int(games[0]["winner_player_id"])
-                            wins[w] = wins.get(w, 0) + 1
+                            bo = int(mr["best_of"] or 1)
+                            wa = sum(1 for g in games if int(g["winner_player_id"]) == a)
+                            wb = sum(1 for g in games if int(g["winner_player_id"]) == b)
+                            w = None
+                            if bo == 1 and len(games) >= 1:
+                                w = int(games[0]["winner_player_id"])
+                            else:
+                                needed = bo // 2 + 1
+                                if wa >= needed and wa > wb:
+                                    w = a
+                                elif wb >= needed and wb > wa:
+                                    w = b
+                            if w is not None:
+                                wins[w] = wins.get(w, 0) + 1
                         for g in games:
                             if g["delta_life"] is None:
                                 continue
+                            # Always count per-game wins (useful as a Bo3 tie-breaker)
+                            try:
+                                wpid0 = int(g["winner_player_id"])
+                                game_wins[wpid0] = game_wins.get(wpid0, 0) + 1
+                            except Exception:
+                                pass
                             d = int(g["delta_life"])
                             wpid = int(g["winner_player_id"]); lpid = int(g["loser_player_id"])
                             delta[wpid] = delta.get(wpid, 0) + d
@@ -1856,7 +2024,8 @@ class Handler(BaseHTTPRequestHandler):
                         group_pids.add(int(mr["player_a"])); group_pids.add(int(mr["player_b"]))
                     arr = list(group_pids)
                     rng = secrets.SystemRandom()
-                    arr.sort(key=lambda pid: (-wins.get(pid, 0), -delta.get(pid, 0), rng.random()))
+                    # Tie-break (especially relevant for Bo3): wins → game wins → Δ life → random
+                    arr.sort(key=lambda pid: (-wins.get(pid, 0), -game_wins.get(pid, 0), -delta.get(pid, 0), rng.random()))
                     return arr, wins, delta
 
                 g1, wins1, d1 = group_standings(1)
@@ -1913,9 +2082,10 @@ class Handler(BaseHTTPRequestHandler):
                         return int(games[0]["winner_player_id"])
                     wa = sum(1 for g in games if int(g["winner_player_id"]) == a)
                     wb = sum(1 for g in games if int(g["winner_player_id"]) == b)
-                    if wa >= 2 and wa > wb:
+                    needed = bo_ // 2 + 1
+                    if wa >= needed and wa > wb:
                         return a
-                    if wb >= 2 and wb > wa:
+                    if wb >= needed and wb > wa:
                         return b
                     return None
                 w1 = winner(int(semis[0]["id"]))
@@ -2010,13 +2180,15 @@ class Handler(BaseHTTPRequestHandler):
                 if existing and not allow_edit:
                     raise ValueError("This game already has a winner. Use 'Modify results' to change it.")
 
-                # Determine duel format (Bo1/Bo3)
-                em = conn.execute(
-                    "SELECT e.mode FROM event e JOIN match m ON m.event_id=e.id WHERE m.id=?",
+                # Determine duel format.
+                # IMPORTANT: never infer BoX from event.mode, because group_playoff matches can be Bo3 too.
+                # Use the per-match best_of column whenever possible.
+                mr2 = conn.execute(
+                    "SELECT m.best_of, e.mode FROM match m JOIN event e ON e.id=m.event_id WHERE m.id=?",
                     (match_id,),
                 ).fetchone()
-                mode = (em["mode"] if em else "duel_single") or "duel_single"
-                best_of = 3 if mode == "duel_bo3" else 1
+                mode = (str(mr2["mode"]) if mr2 else "duel_single") or "duel_single"
+                best_of = int((mr2["best_of"] if mr2 and mr2["best_of"] is not None else None) or (3 if mode == "duel_bo3" else 1))
                 if game_no < 1 or game_no > best_of:
                     raise ValueError(f"Game number must be between 1 and {best_of}")
 
